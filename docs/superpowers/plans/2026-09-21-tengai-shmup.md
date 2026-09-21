@@ -431,24 +431,31 @@ cd /home/ec2-user/capstone/clawd-jump/frontend && nohup python3 -m http.server 8
     await api.wait(page, 200);
     const start = await api.dbg(page);
 
-    // 우하단으로 충분히 길게 밀어 클램프 확인
+    // 우하단 클램프. 대각 이동의 x 성분은 150/sqrt(2) = 106 px/s 뿐이므로
+    // x=60에서 604까지 가려면 5.1초가 걸린다. 벽 시계를 낭비하지 않기 위해
+    // 모서리 근처로 텔레포트한 뒤 짧게 밀어 클램프만 확인한다.
+    await page.evaluate(() => window.__tp(560, 290));
     await page.keyboard.down('ArrowRight');
     await page.keyboard.down('ArrowDown');
-    await api.wait(page, 2000);
+    await api.wait(page, 900);
     await page.keyboard.up('ArrowRight');
     await page.keyboard.up('ArrowDown');
     const clamped = await api.dbg(page);
 
-    // 좌상단으로 클램프
+    // 좌상단 클램프
+    await page.evaluate(() => window.__tp(40, 40));
     await page.keyboard.down('ArrowLeft');
     await page.keyboard.down('ArrowUp');
-    await api.wait(page, 2000);
+    await api.wait(page, 900);
     await page.keyboard.up('ArrowLeft');
     await page.keyboard.up('ArrowUp');
     const clampedTL = await api.dbg(page);
 
-    // 대각선 정규화: 같은 시간 동안 순수 우향 이동과 대각 우하 이동의
-    // x 증가량이 같아야 한다. 정규화가 없으면 대각선이 41% 더 간다.
+    // 대각선 정규화 검사. 이 시나리오는 x 변위만 비교한다:
+    //   정규화 있음(정상) → 대각 x속도 150/sqrt(2)=106 → 비율 약 0.707
+    //   정규화 없음(버그) → 대각 x속도 150 그대로   → 비율 약 1.000
+    // 비율이 1에 가까우면 버그다. 1.41은 총 이동거리(hypot)를 비교할 때
+    // 나오는 값이며 여기서는 나오지 않는다.
     await page.evaluate(() => window.__tp(0, 100));
     await api.hold(page, 'ArrowRight', 500);
     const pureX = (await api.dbg(page)).px;
@@ -480,10 +487,10 @@ node /tmp/cj/verify.js player
 기대 결과:
 - `consoleErrors`: `[]`
 - `result.start`: `state: "PLAYING"`, `px: 60`, `py: 162` (`360/2 − 18`), `lives: 3`, `bombs: 2`, `power: 1`, `score: 0`
-- `result.clamped`: `px: **604**` (`W − PW = 640 − 36`), `py: **324**` (`H − PH = 360 − 36`)
-- `result.clampedTL`: `px: **0**`, `py: **0**`
-- `result.diagRatio`: **0.95 ~ 1.05**. 약 **1.41** 이 나오면 대각선 정규화가 빠진 것이다
-- `result.fired.pbullets`: **0보다 크다** (400ms / 0.11s ≈ 3발 발사, 일부는 이미 화면 밖)
+- `result.clamped`: `px: **604**` (`W − PW = 640 − 36`), `py: **324**` (`H − PH = 360 − 36`). 560/290에서 900ms 대각 이동은 x·y 각 +95px이므로 두 축 모두 클램프에 닿는다
+- `result.clampedTL`: `px: **0**`, `py: **0**` (40/40에서 900ms면 −95px로 두 축 모두 0에 걸린다)
+- `result.diagRatio`: **0.68 ~ 0.73** (이론값 `1/√2 = 0.707`). **1.00 근처면 대각선 정규화가 빠진 버그다** — x축 속도가 감쇠 없이 그대로라는 뜻이다
+- `result.fired.pbullets`: **0보다 크다** (400ms / 0.11s ≈ 3~4발, 일부는 이미 화면 밖)
 
 - [ ] **Step 11: 스크린샷 확인**
 
