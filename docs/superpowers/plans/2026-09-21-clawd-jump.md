@@ -1,5 +1,8 @@
 # Clawd Jump Implementation Plan
 
+> **Task 1만 유효 (완료, 07d4708).** Task 2~7은 장르 전환으로 폐기되었다.
+> 유효 계획: `2026-09-21-tengai-shmup.md`
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 순수 HTML5 Canvas + vanilla JS 단일 파일 픽셀아트 플랫포머를 만들고 S3 + CloudFront에 배포한다.
@@ -1031,6 +1034,7 @@ EOF
 - Produces:
   - `function camX(): number` — 정수로 스냅된 카메라 X
   - `render()` 에 타일 렌더 + 컬링
+  - `window.__tp(x, y): void` — 검증 하니스 전용 텔레포트 훅 (Task 6도 사용)
 
 - [ ] **Step 1: 블록 9에 카메라와 타일 렌더**
 
@@ -1079,7 +1083,7 @@ EOF
   }
 ```
 
-- [ ] **Step 2: 블록 10의 `__dbg`에 `camX` 추가**
+- [ ] **Step 2: 블록 10에 `camX` 노출과 텔레포트 훅 추가**
 
 `__dbg` 반환 객체에 한 줄 추가한다.
 
@@ -1087,23 +1091,42 @@ EOF
     camX: camX(),
 ```
 
+그리고 `window.__dbg` 정의 **아래**에 검증 전용 훅을 넣는다.
+
+```js
+  // 검증 하니스 전용: 플레이어를 특정 좌표에 놓는다.
+  // 레벨 중반·후반은 4타일 구덩이를 점프로 건너야 도달하므로, 키 홀드만으로
+  // 카메라 추적과 우측 경계 clamp를 검증할 수 없다.
+  window.__tp = (x, y) => {
+    player.x = x; player.y = y; player.vx = 0; player.vy = 0;
+  };
+```
+
 - [ ] **Step 3: 하니스에 `camera` 시나리오 추가**
 
 ```js
-  // Task 5 — 카메라 추적과 좌측 경계 clamp
+  // Task 5 — 카메라 추적, 좌우 경계 clamp
   camera: async (page) => {
     await api.wait(page, 300);
-    const start = await api.dbg(page);        // 레벨 왼쪽 끝: camX가 0에 clamp
+    const atLeftEdge = await api.dbg(page);     // 스폰 x=32 → camX가 0에 clamp
     await api.shot(page, 'cam-start');
 
-    await api.hold(page, 'ArrowRight', 1500);
-    const moving = await api.dbg(page);
+    // 평지(열 46-49, 가시 구덩이 바로 오른쪽)로 옮겨 실제 추적을 확인한다.
+    // 키 홀드만으로는 x=302를 넘길 수 없다 — 열 16-19의 4타일 구덩이를
+    // 점프로 건너야 하므로 텔레포트가 필요하다.
+    await page.evaluate(() => { window.__tp(47 * 16, 18 * 16 - 24); });
+    await api.wait(page, 200);
+    const midLevel = await api.dbg(page);
     await api.shot(page, 'cam-mid');
-    return { start, moving, camXUpperBound: 1600 - 640 };
+
+    // 최종 지면(열 97) → camX 상한 clamp
+    await page.evaluate(() => { window.__tp(97 * 16, 18 * 16 - 24); });
+    await api.wait(page, 200);
+    const atRightEdge = await api.dbg(page);
+    await api.shot(page, 'cam-right');
+    return { atLeftEdge, midLevel, atRightEdge, camXUpperBound: 1600 - 640 };
   },
 ```
-
-> 우측 경계 clamp(`camX` 상한 960)는 레벨 끝까지 실제로 플레이해야 도달하므로 이 시나리오에서는 확인하지 않는다. Task 6에서 `__tp` 훅이 생긴 뒤 `gameplay` 시나리오의 깃발 구간(`__tp(95*16, ...)`)에서 자동으로 검증된다 — 그때 `camX`가 정확히 **960**이어야 한다.
 
 - [ ] **Step 4: 검증 실행**
 
@@ -1111,20 +1134,23 @@ EOF
 node /tmp/cj/verify.js camera
 ```
 
-기대 결과:
+기대 결과 (`camX = round(clamp(x + 18 − 320, 0, 960))`):
 - `consoleErrors`: `[]`
-- `result.start.camX`: **0** (플레이어가 x=32에 있고 `32 + 18 - 320 = -270` → 0으로 clamp)
-- `result.moving.camX`: **0보다 크다**. 플레이어 x가 320 − 18 = 302를 넘어서면 카메라가 따라 움직인다
-- `result.moving.camX` ≤ **960** (`camXUpperBound`)
+- `result.atLeftEdge`: `x: 32`, `camX: 0` (`32 + 18 − 320 = −270` → 0으로 clamp)
+- `result.midLevel`: `x: 752`, `camX: **450**` (`752 + 18 − 320`), `onGround: true` (열 46-49는 행 18이 지형)
+- `result.atRightEdge`: `x: 1552`, `camX: **960**` (`1552 + 18 − 320 = 1250` → 960으로 clamp = `camXUpperBound`)
+
+> `atRightEdge`의 `onGround`도 `true`여야 한다 (열 96-99가 행 18 지형). `false`면 텔레포트 좌표나 맵이 어긋난 것이다. 이 위치는 깃발 타일(열 97 행 17) 위지만 Task 5에는 아직 깃발 판정이 없으므로 아무 일도 일어나지 않는다.
 
 - [ ] **Step 5: 스크린샷 확인**
 
-`/tmp/cj/cam-start.png` 와 `/tmp/cj/cam-mid.png` 를 Read 툴로 읽는다.
+`/tmp/cj/cam-start.png`, `/tmp/cj/cam-mid.png`, `/tmp/cj/cam-right.png` 를 Read 툴로 읽는다.
 
 기대:
-- `cam-start.png`: 화면 하단에 `#3A3631` 지형(상단 1px `#544E46` 하이라이트), 왼쪽 위에 Clawd. 오른쪽에 첫 구덩이(열 16-19)의 검은 틈이 보인다.
-- `cam-mid.png`: 지형이 왼쪽으로 스크롤되어 다른 구간이 보인다. 계단 또는 공중 발판이 화면에 들어올 수 있다.
-- 두 스크린샷 모두: 타일 경계가 **선명한 직선**이어야 한다. 흐릿하면 `Math.round` 누락이다.
+- `cam-start.png`: 화면 하단에 `#3A3631` 지형(상단 1px `#544E46` 하이라이트), 왼쪽에 Clawd. 오른쪽에 첫 구덩이(열 16-19)의 어두운 틈이 보인다.
+- `cam-mid.png`: `camX = 450` → 열 28~68이 보인다. 가시 구덩이의 **한 타일 깊이 홈**(열 42-45, 아직 가시는 안 그려짐)과 오른쪽의 **계단식 지형**(열 50부터 올라감)이 보여야 한다.
+- `cam-right.png`: `camX = 960` → 열 60~100. 계단 상단부, 1타일 두께의 공중 발판 2개(열 76-79 행 13, 열 84-87 행 16), 최종 지면의 홈(열 92-95)이 보인다. 레벨 오른쪽 끝이므로 화면 우측에 빈 공간이 없어야 한다.
+- 세 스크린샷 모두: 타일 경계가 **선명한 직선**이어야 한다. 흐릿하면 `Math.round` 누락이다.
 
 - [ ] **Step 6: 사용자 수동 플레이 (Phase 2 게이트)**
 
@@ -1149,6 +1175,10 @@ Phase 2 완료. 레벨 높이 352px가 캔버스 360px과 거의 같아 수직 �
 생략하고 카메라는 X축만 추적한다. 차이 8px은 지형색으로 채워 지면이
 이어져 보이게 한다.
 
+검증용 __tp 훅도 함께 넣는다. 레벨 중반/후반은 4타일 구덩이를 점프로
+건너야 도달하므로, 키 홀드만으로는 카메라 추적과 우측 경계 clamp를
+검증할 방법이 없다.
+
 카메라 좌표는 Math.round로 정수 스냅한다. 소수 좌표면 모든 타일이
 서브픽셀에 찍혀 픽셀아트가 흐려지고 스크롤 중 떨림이 보인다.
 
@@ -1166,10 +1196,10 @@ EOF
 
 **Files:**
 - Modify: `frontend/index.html` (블록 5·6·8·9·10)
-- Modify: `/tmp/cj/verify.js` (`scenarios.gameplay` 추가)
+- Modify: `/tmp/cj/verify.js` (`scenarios.gameplay`, `scenarios.coyote` 추가)
 
 **Interfaces:**
-- Consumes: `level`, `player`, `respawn()`, `camX()`, `COLOR`, `W`, `H`, `TILE`, `PW`, `PH`
+- Consumes: `level`, `player`, `respawn()`, `camX()`, `COLOR`, `W`, `H`, `TILE`, `PW`, `PH`, `window.__tp` (Task 5에서 추가됨)
 - Produces:
   - `const game = { state: "PLAYING" | "CLEAR", coins: Coin[], collected: number }`
     `Coin = { x, y, w, h, taken: boolean }`
@@ -1335,12 +1365,11 @@ EOF
     coinsLeft: game.coins.filter((c) => !c.taken).length,
 ```
 
-- [ ] **Step 6: 검증용 텔레포트 훅 추가**
+- [ ] **Step 6: `__tp` 훅이 이미 있는지 확인 (새로 만들지 말 것)**
 
-블록 10의 `window.__dbg` 정의 **아래**에 넣는다. `__dbg`와 같은 성격의 검증 전용 창구다 — 레벨 후반(가시 구덩이, 깃발)에 실제로 플레이해서 도달하려면 헤드리스 하니스가 사람만큼 잘 플레이해야 하므로, 위치를 직접 놓는 훅이 필요하다.
+`window.__tp` 는 **Task 5에서 이미 추가되었다.** 블록 10에 아래 형태로 존재하는지만 확인하고, 없다면 그때 추가한다. 중복 정의하지 말 것.
 
 ```js
-  // 검증 하니스 전용: 플레이어를 특정 좌표에 놓는다
   window.__tp = (x, y) => {
     player.x = x; player.y = y; player.vx = 0; player.vy = 0;
   };
