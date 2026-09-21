@@ -259,14 +259,47 @@
     }
   }
 
+  // 원작에서 텐가이의 사역마는 매이고, 차지하면 봉황이 되어 돌진한다.
+  // pierce: true 로 관통(뚫고 나가는 돌진)을 표현한다.
+  function firePhoenix() {
+    pbullets.push({
+      x: player.x + PW, y: player.y + PH / 2 - PHOENIX_H / 2,
+      w: PHOENIX_W, h: PHOENIX_H, vx: PHOENIX_SPEED, dmg: PHOENIX_DMG, pierce: true,
+      hit: new Set(),  // 관통 탄이 같은 표적을 여러 프레임에 걸쳐 겹쳐 있는 동안
+                        // 매 프레임 다시 때리는 것을 막는다(표적당 1회만 데미지).
+    });
+  }
+
   function useBomb() {
-    // (Task 4)
+    if (game.state !== "PLAYING" || player.bombs <= 0 || game.bombFx > 0) return;
+    player.bombs -= 1;
+    game.bombFx = BOMB_SWEEP;
+    ebullets.length = 0;                       // 화면의 적 탄 전부 제거
+    for (const e of enemies) e.hp -= BOMB_DMG;
+    if (game.boss) game.boss.hp -= BOMB_DMG;
   }
 
   // ===== 8. 스텝 =====
 
+  // 최종보스. 원작처럼 제한 시간이 있고, 늦으면 CLEAR 대신 BADEND가 된다.
+  const BOSS = {
+    w: 72, h: 96, hpMax: 120,
+    timeLimit: 45,
+    p1Fire: 1.2, p2Fire: 0.8,
+    xHome: W - 110,
+  };
+
+  function spawnBoss() {
+    game.boss = { x: W + 20, y: H / 2 - BOSS.h / 2, hp: BOSS.hpMax, t: 0, fireCd: 1.0, phase: 1, dash: 0 };
+    game.bossTimer = BOSS.timeLimit;
+  }
+
+  function bossBox() {
+    return { x: game.boss.x, y: game.boss.y, w: BOSS.w, h: BOSS.h };
+  }
+
   function spawn(type, y) {
-    if (type === "boss") return; // (Task 4)
+    if (type === "boss") { spawnBoss(); return; }
     const d = ENEMY_DEF[type];
     enemies.push({ kind: type, x: W, y, y0: y, w: d.w, h: d.h, hp: d.hp, t: 0, fireCd: d.fire });
   }
@@ -346,6 +379,48 @@
     }
   }
 
+  function stepBoss(dt) {
+    const b = game.boss;
+    if (!b) return;
+    b.t += dt;
+    b.phase = b.hp > BOSS.hpMax / 2 ? 1 : 2;
+
+    // phase 2: 3초마다 1초간 좌향 돌진 후 xHome으로 복귀
+    let dashing = false;
+    if (b.phase === 2) {
+      b.dash += dt;
+      if (b.dash >= 4) b.dash = 0;
+      dashing = b.dash >= 3;
+    }
+
+    if (dashing) {
+      b.x -= 180 * dt;
+    } else if (b.x > BOSS.xHome) {
+      b.x = Math.max(BOSS.xHome, b.x - 70 * dt);
+    } else if (b.x < BOSS.xHome) {
+      b.x = Math.min(BOSS.xHome, b.x + 70 * dt);
+    }
+
+    b.y = H / 2 - BOSS.h / 2 + Math.sin(b.t * 0.8) * 70;
+
+    b.fireCd -= dt;
+    if (b.fireCd <= 0) {
+      const cx = b.x, cy = b.y + b.h / 2;
+      if (b.phase === 1) fireAimed(cx, cy, [-0.25, 0, 0.25]);
+      else fireAimed(cx, cy, [-0.5, -0.25, 0, 0.25, 0.5]);
+      b.fireCd = b.phase === 1 ? BOSS.p1Fire : BOSS.p2Fire;
+    }
+
+    game.bossTimer -= dt;
+    if (game.bossTimer <= 0) { game.state = "BADEND"; return; }
+
+    if (b.hp <= 0) {
+      game.state = "CLEAR";
+      game.score += 5000 + player.bombs * 1000;
+      game.boss = null;
+    }
+  }
+
   // 적 본체 접촉: 죽지 않는다 — 파워 레벨만 1 내려가고 잠시 무적이 된다.
   // 원작 텐가이의 비대칭 피격 규칙(죽음은 적 탄에서만 온다).
   function contactPlayer() {
@@ -383,6 +458,7 @@
     game.time += dt;
     game.scroll += SCROLL_BASE * dt;
     if (player.invuln > 0) player.invuln -= dt;
+    if (game.bombFx > 0) game.bombFx = Math.max(0, game.bombFx - dt);
 
     // 8방향 이동, 관성 없음. 대각선을 정규화하지 않으면 비스듬히 가는 것이
     // sqrt(2)배(약 141%) 빨라져 "대각선이 최적"인 버그가 된다.
@@ -399,7 +475,8 @@
       player.charge = Math.min(player.charge + dt, CHARGE_FULL);
       if (player.fireCd <= 0) { fireBeads(); player.fireCd = FIRE_INTERVAL; }
     } else {
-      player.charge = 0;                 // Task 4가 만충 시 봉황 발사로 확장
+      if (player.charge >= CHARGE_FULL) firePhoenix();
+      player.charge = 0;
     }
 
     for (let i = pbullets.length - 1; i >= 0; i--) {
@@ -412,17 +489,30 @@
     stepEnemies(dt);
     stepEbullets(dt);
     stepItems(dt);
+    stepBoss(dt);
+    if (game.state !== "PLAYING") return;
 
-    // 충돌 판정
+    // 충돌 판정. 보스도 이 루프에 포함된다 — 히트박스는 전체 박스(72x96).
+    // pierce(봉황)는 적/보스를 맞혀도 사라지지 않고 계속 관통한다.
     for (let i = pbullets.length - 1; i >= 0; i--) {
       const b = pbullets[i];
       let hit = false;
       for (const e of enemies) {
         if (overlaps(b, e)) {
-          e.hp -= b.dmg;
+          if (!b.pierce || !b.hit.has(e)) {
+            e.hp -= b.dmg;
+            if (b.pierce) b.hit.add(e);
+          }
           hit = true;
           if (!b.pierce) break;
         }
+      }
+      if ((!hit || b.pierce) && game.boss && overlaps(b, bossBox())) {
+        if (!b.pierce || !b.hit.has(game.boss)) {
+          game.boss.hp -= b.dmg;
+          if (b.pierce) b.hit.add(game.boss);
+        }
+        hit = true;
       }
       if (hit && !b.pierce) pbullets.splice(i, 1);
     }
@@ -447,16 +537,26 @@
     ctx.fillRect(0, 0, W, H);
     drawParallax();
 
+    drawBoss();       // 보스는 적보다 먼저 그린다
     drawItems();
     drawEnemies();
 
-    ctx.fillStyle = PALETTE.G;
-    for (const b of pbullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
+    // 봉황(pierce)은 일반 염주와 구분된다 — 뒤쪽에 붉은 꼬리를 덧그린다.
+    for (const b of pbullets) {
+      if (b.pierce) {
+        ctx.fillStyle = PALETTE.R;
+        ctx.fillRect(Math.round(b.x - 8), Math.round(b.y + b.h / 2 - 2), 8, 4);
+      }
+      ctx.fillStyle = PALETTE.G;
+      ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
+    }
 
     drawEbullets();
+    drawBombFx();
 
     drawPlayer();
     drawHud();
+    drawOverlay();    // 오버레이는 가장 마지막(HUD 뒤)에 그린다
   }
 
   function drawEnemies() {
@@ -470,6 +570,59 @@
   function drawEbullets() {
     ctx.fillStyle = COLOR.ebullet;
     for (const b of ebullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), EB_W, EB_W);
+  }
+
+  // 절차적 보스 렌더: 몸통 + 장갑판 3개 + 눈 2개 + 외곽, 상단에 HP 바와 TIME.
+  function drawBoss() {
+    const b = game.boss;
+    if (!b) return;
+    const x = Math.round(b.x), y = Math.round(b.y);
+
+    ctx.fillStyle = COLOR.wall;
+    ctx.fillRect(x, y, BOSS.w, BOSS.h);
+
+    ctx.fillStyle = PALETTE.M;
+    ctx.fillRect(x + 8, y + 12, 20, 14);
+    ctx.fillRect(x + 8, y + 40, 20, 14);
+    ctx.fillRect(x + 8, y + 68, 20, 14);
+
+    ctx.fillStyle = PALETTE.C;
+    ctx.fillRect(x + 44, y + 24, 10, 10);
+    ctx.fillRect(x + 44, y + 60, 10, 10);
+
+    ctx.strokeStyle = PALETTE.D;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, BOSS.w - 2, BOSS.h - 2);
+
+    // HP 바. 기존 HUD 두 줄(y=12, y=24)과 겹치지 않게 그 아래(y=30)에 그린다.
+    const barW = W - 120, barH = 6, barX = 60, barY = 30;
+    ctx.fillStyle = COLOR.wall;
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = PALETTE.C;
+    ctx.fillRect(barX, barY, Math.round(barW * clamp(b.hp / BOSS.hpMax, 0, 1)), barH);
+
+    drawText(`TIME ${Math.ceil(game.bossTimer)}`, barX + barW + 6, barY + 6, 10);
+  }
+
+  // 봄(卍): 전방으로 흐르는 거대한 만자 스윕.
+  function drawBombFx() {
+    if (game.bombFx <= 0) return;
+    const progress = 1 - game.bombFx / BOMB_SWEEP;
+    const bx = Math.round(progress * (W + 48) - 48);
+    const by = Math.round(H / 2 - 24);
+    const t = 8;
+    ctx.fillStyle = PALETTE.G;
+    // 세로 막대 2개 (위/아래, 엇갈림)
+    ctx.fillRect(bx + 20, by, t, 24);
+    ctx.fillRect(bx + 12, by + 24, t, 24);
+    // 가로 막대 2개 (좌/우, 엇갈림)
+    ctx.fillRect(bx, by + 12, 24, t);
+    ctx.fillRect(bx + 24, by + 20, 24, t);
+    // 끝단 4개
+    ctx.fillRect(bx, by, t, t);
+    ctx.fillRect(bx + 40, by, t, t);
+    ctx.fillRect(bx, by + 40, t, t);
+    ctx.fillRect(bx + 40, by + 40, t, t);
   }
 
   function drawItems() {
@@ -539,6 +692,34 @@
     drawText(`LIFE ${player.lives}   BOMB ${player.bombs}   POWER ${player.power}`, 6, 24);
   }
 
+  function drawCentered(s, y, size) {
+    ctx.font = size + "px monospace";
+    ctx.textBaseline = "alphabetic";
+    const width = ctx.measureText(s).width;
+    ctx.fillStyle = COLOR.hud;
+    ctx.fillText(s, (W - width) / 2, y);
+  }
+
+  function drawOverlay() {
+    if (game.state === "PLAYING") return;
+    ctx.fillStyle = COLOR.overlay;
+    ctx.fillRect(0, 0, W, H);
+
+    if (game.state === "CLEAR") {
+      drawCentered("CLEAR!", 160, 20);
+      drawCentered(`SCORE ${String(game.score).padStart(6, "0")}`, 190, 10);
+      drawCentered("PRESS R TO RESTART", 210, 10);
+    } else if (game.state === "BADEND") {
+      drawCentered("BAD END", 160, 20);
+      drawCentered("보스를 시간 내에 쓰러뜨리지 못했다", 190, 10);
+      drawCentered("PRESS R TO RESTART", 210, 10);
+    } else if (game.state === "GAMEOVER") {
+      drawCentered("GAME OVER", 160, 20);
+      drawCentered(`SCORE ${String(game.score).padStart(6, "0")}`, 190, 10);
+      drawCentered("PRESS R TO RESTART", 210, 10);
+    }
+  }
+
   // ===== 10. 루프 + 디버그 훅 =====
   let acc = 0, steps = 0, last = performance.now();
 
@@ -567,6 +748,10 @@
     pbullets: pbullets.length, ebullets: ebullets.length,
     enemies: enemies.length, items: items.length,
     waveIdx: game.waveIdx, pending: game.pending.length,
+    bossHp: game.boss ? game.boss.hp : null,
+    bossPhase: game.boss ? game.boss.phase : null,
+    bossTimer: Math.round(game.bossTimer * 10) / 10,
+    bombFx: Math.round(game.bombFx * 100) / 100,
   });
 
   // 검증 하니스 전용
