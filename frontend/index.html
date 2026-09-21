@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TENGAI — 戦国</title>
+<title>짭가이 — 戦国</title>
 <style>
   html, body {
     margin: 0;
@@ -82,8 +82,13 @@
   let scale = 1;
   function fitCanvas() {
     // 정수 배율만 사용한다. 소수 배율은 pixelated 필터에서도 일부 논리 픽셀을
-    // 2px, 일부를 3px로 찍어 스프라이트 두께를 불규칙하게 만든다.
-    scale = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+    // 2px, 일부를 3px로 찍어 스프라이트 두께를 불규칙하게 만든다. 다만 그 제약은
+    // 배율이 1 이상일 때만 적용한다 — 뷰포트가 640x360보다 작아 raw 비율이 1
+    // 미만인데도 정수(=1)로 올려버리면 캔버스가 뷰포트보다 커져 화면 밖으로
+    // 잘린다. 이 경우엔 종횡비를 유지한 채 소수 배율로 뷰포트에 맞춘다 —
+    // 살짝 부드러운 화면이라도 화면 전체가 보이는 쪽이 낫다.
+    const raw = Math.min(innerWidth / W, innerHeight / H);
+    scale = raw >= 1 ? Math.floor(raw) : raw;
     canvas.style.width = W * scale + "px";
     canvas.style.height = H * scale + "px";
   }
@@ -243,6 +248,15 @@
     if (HANDLED.has(e.code)) keys.delete(e.code);
   });
 
+  // Alt-Tab 등으로 창이 포커스를 잃으면 keyup이 이 창에 도착하지 않아 그
+  // 방향/발사 키가 영원히 눌린 채로 남는다(입력 래치). charge도 같이 비워야
+  // 한다 — 그러지 않으면 포커스가 돌아올 때 사용자가 요청하지 않은 봉황이
+  // 즉시 발사된다.
+  addEventListener("blur", () => {
+    keys.clear();
+    player.charge = 0;
+  });
+
   const firing = () => keys.has("KeyZ") || keys.has("Space");
 
   // ===== 7. 발사 =====
@@ -382,6 +396,16 @@
   function stepBoss(dt) {
     const b = game.boss;
     if (!b) return;
+    // hp 판정을 시간 판정보다 먼저 본다. 킬링 블로우는 이 함수보다 나중에
+    // 실행되는 충돌 루프(:497-518)에서 hp를 깎으므로, 그 다음 프레임에
+    // stepBoss가 다시 불렸을 때 시간 초과(BADEND) 판정이 먼저 걸려버리면
+    // 제한 시간 내의 격파가 배드 엔딩으로 뒤집힌다. 죽었으면 시계를 보지 않는다.
+    if (b.hp <= 0) {
+      game.state = "CLEAR";
+      game.score += 5000 + player.bombs * 1000;
+      game.boss = null;
+      return;
+    }
     b.t += dt;
     b.phase = b.hp > BOSS.hpMax / 2 ? 1 : 2;
 
@@ -405,33 +429,36 @@
 
     b.fireCd -= dt;
     if (b.fireCd <= 0) {
-      const cx = b.x, cy = b.y + b.h / 2;
+      const cx = b.x, cy = b.y + BOSS.h / 2;
       if (b.phase === 1) fireAimed(cx, cy, [-0.25, 0, 0.25]);
       else fireAimed(cx, cy, [-0.5, -0.25, 0, 0.25, 0.5]);
       b.fireCd = b.phase === 1 ? BOSS.p1Fire : BOSS.p2Fire;
     }
 
     game.bossTimer -= dt;
-    if (game.bossTimer <= 0) { game.state = "BADEND"; return; }
-
-    if (b.hp <= 0) {
-      game.state = "CLEAR";
-      game.score += 5000 + player.bombs * 1000;
-      game.boss = null;
-    }
+    if (game.bossTimer <= 0) { game.state = "BADEND"; }
   }
 
   // 적 본체 접촉: 죽지 않는다 — 파워 레벨만 1 내려가고 잠시 무적이 된다.
-  // 원작 텐가이의 비대칭 피격 규칙(죽음은 적 탄에서만 온다).
+  // 원작 텐가이의 비대칭 피격 규칙(죽음은 적 탄에서만 온다). 보스도 몸통이므로
+  // 이 규칙에 포함된다 — 보스는 enemies 배열이 아니라 game.boss에 살기 때문에
+  // bossBox()를 별도로 검사해야 한다.
   function contactPlayer() {
     if (player.invuln > 0) return;
     const hb = playerHit();
     for (const e of enemies) {
+      // hp<=0인 시체는 다음 프레임의 stepEnemies에서 제거될 뿐 이번 프레임에는
+      // 아직 배열에 남아 있다 — 방금 죽은 적과의 접촉을 파워 감점으로 치면 안 된다.
+      if (e.hp <= 0) continue;
       if (overlaps(hb, e)) {
         player.power = Math.max(1, player.power - 1);
         player.invuln = INVULN_CONTACT;
-        break;
+        return;
       }
+    }
+    if (game.boss && overlaps(hb, bossBox())) {
+      player.power = Math.max(1, player.power - 1);
+      player.invuln = INVULN_CONTACT;
     }
   }
 
@@ -556,6 +583,7 @@
 
     drawPlayer();
     drawHud();
+    drawBossHud();    // 판정용 HP/TIME 표시는 플레이어와 탄보다 위, HUD와 같은 층
     drawOverlay();    // 오버레이는 가장 마지막(HUD 뒤)에 그린다
   }
 
@@ -572,7 +600,8 @@
     for (const b of ebullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), EB_W, EB_W);
   }
 
-  // 절차적 보스 렌더: 몸통 + 장갑판 3개 + 눈 2개 + 외곽, 상단에 HP 바와 TIME.
+  // 절차적 보스 렌더: 몸통 + 장갑판 3개 + 눈 2개 + 외곽. HUD(HP 바, TIME)는
+  // drawBossHud()가 따로 그린다 — 이 함수는 몸통 스프라이트만 책임진다.
   function drawBoss() {
     const b = game.boss;
     if (!b) return;
@@ -593,8 +622,15 @@
     ctx.strokeStyle = PALETTE.D;
     ctx.lineWidth = 2;
     ctx.strokeRect(x + 1, y + 1, BOSS.w - 2, BOSS.h - 2);
+  }
 
-    // HP 바. 기존 HUD 두 줄(y=12, y=24)과 겹치지 않게 그 아래(y=30)에 그린다.
+  // 보스 HP 바 + TIME 표시. 플레이어 스프라이트/탄에 가려지면 안 되는 판정용
+  // 정보이므로 몸통(drawBoss)과 분리해 render()에서 나머지 HUD와 같은
+  // z-순서(최상단)에 그린다. 기존 HUD 두 줄(y=12, y=24)과 겹치지 않게 그
+  // 아래(y=30)에 그린다.
+  function drawBossHud() {
+    const b = game.boss;
+    if (!b) return;
     const barW = W - 120, barH = 6, barX = 60, barY = 30;
     ctx.fillStyle = COLOR.wall;
     ctx.fillRect(barX, barY, barW, barH);
@@ -759,6 +795,20 @@
   // 검증 하니스 전용: 웨이브 시계를 앞으로 돌린다.
   // 보스 구간(31초)을 헤드리스로 검증하려면 실시간 대기가 불가능하다.
   window.__skipTo = (sec) => { game.time = sec; };
+  // 검증 하니스 전용: 적 탄의 실제 좌표/속도. __dbg는 개수만 주므로
+  // NaN 회귀(:408)를 다시 잡으려면 좌표 자체가 필요하다.
+  window.__eb = () => ebullets.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy }));
+  // 검증 하니스 전용: 보스 히트박스(없으면 null). 보스 접촉 판정(:459)을
+  // 검증하려면 테스트가 보스를 따라다니며 겹치게 해야 한다.
+  window.__bossBox = () => (game.boss ? bossBox() : null);
+  // 검증 하니스 전용: 파워 레벨을 강제로 설정한다. 접촉 시 파워가 "감소"함을
+  // 보이려면 최소값(1)보다 높은 값에서 시작해야 한다.
+  window.__setPower = (p) => { player.power = p; };
+  // 검증 하니스 전용: 라이프를 강제로 설정한다. __skipTo로 웨이브 시계를
+  // 한번에 앞으로 돌리면 그 사이 모든 웨이브가 한꺼번에 대기열에 들어가
+  // 평소보다 훨씬 많은 적이 몰리므로, GAMEOVER로 스텝 루프가 멈춰버리기 전에
+  // 보스 탄의 컬링을 오래 관찰하려면 라이프를 넉넉히 준다.
+  window.__setLives = (n) => { player.lives = n; };
 
   requestAnimationFrame(frame);
 })();

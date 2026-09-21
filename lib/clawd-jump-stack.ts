@@ -32,7 +32,7 @@ export class ClawdJumpStack extends cdk.Stack {
       },
       defaultRootObject: 'index.html',
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
-      comment: 'Tengai shmup static site',
+      comment: 'Jjapgai shmup static site',
     });
 
     // 소스가 평범한 디렉터리 asset이므로 로컬에서 zip되며 Docker가 필요없다.
@@ -49,7 +49,7 @@ export class ClawdJumpStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'SiteUrl', {
       value: `https://${distribution.distributionDomainName}`,
-      description: 'Tengai shmup URL',
+      description: 'Jjapgai shmup URL',
     });
   }
 }
