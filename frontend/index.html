@@ -204,6 +204,25 @@
   const overlaps = (a, b) =>
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
+  const ENEMY_DEF = {
+    oni:      { spr: "ONI",      w: 24, h: 24, hp: 3, vx: -90, amp: 28, fire: 1.4, score: 100 },
+    karakuri: { spr: "KARAKURI", w: 30, h: 24, hp: 8, vx: -60, amp: 0,  fire: 1.8, score: 300 },
+  };
+
+  // 타일 맵이 하던 "데이터로 기술된 레벨" 역할을 이 표가 대신한다.
+  // t = 웨이브 발동 시각(초), n = 마리 수, gap = 마리 사이 간격(초)
+  const WAVES = [
+    { t: 1.0,  type: "oni",      y: 100, n: 4, gap: 0.45 },
+    { t: 4.0,  type: "oni",      y: 220, n: 4, gap: 0.45 },
+    { t: 7.5,  type: "karakuri", y: 160, n: 2, gap: 1.2  },
+    { t: 12.0, type: "oni",      y: 60,  n: 5, gap: 0.35 },
+    { t: 12.5, type: "oni",      y: 260, n: 5, gap: 0.35 },
+    { t: 18.0, type: "karakuri", y: 110, n: 2, gap: 1.0  },
+    { t: 18.5, type: "karakuri", y: 240, n: 2, gap: 1.0  },
+    { t: 25.0, type: "oni",      y: 180, n: 8, gap: 0.3  },
+    { t: 31.0, type: "boss",     y: 140, n: 1, gap: 0    },
+  ];
+
   // ===== 6. 입력 =====
   const keys = new Set();
   const HANDLED = new Set([
@@ -246,6 +265,119 @@
 
   // ===== 8. 스텝 =====
 
+  function spawn(type, y) {
+    if (type === "boss") return; // (Task 4)
+    const d = ENEMY_DEF[type];
+    enemies.push({ kind: type, x: W, y, y0: y, w: d.w, h: d.h, hp: d.hp, t: 0, fireCd: d.fire });
+  }
+
+  function stepWaves(dt) {
+    // 한 프레임에 여러 웨이브가 동시에 발동할 수 있다(12.0초와 12.5초처럼
+    // 가까운 두 웨이브의 동시 상하 공격은 의도된 것이다).
+    while (game.waveIdx < WAVES.length && game.time >= WAVES[game.waveIdx].t) {
+      const w = WAVES[game.waveIdx];
+      game.pending.push({ type: w.type, y: w.y, left: w.n, gap: w.gap, cd: 0 });
+      game.waveIdx++;
+    }
+    for (let i = game.pending.length - 1; i >= 0; i--) {
+      const p = game.pending[i];
+      p.cd -= dt;
+      if (p.cd <= 0) {
+        spawn(p.type, p.y);
+        p.left--;
+        p.cd = p.gap;
+        if (p.left === 0) game.pending.splice(i, 1);
+      }
+    }
+  }
+
+  function fireAimed(ex, ey, spread) {
+    const p = playerHit();
+    const base = Math.atan2(p.y + p.h / 2 - ey, p.x + p.w / 2 - ex);
+    for (const off of spread) {
+      const a = base + off;
+      ebullets.push({
+        x: ex, y: ey,
+        vx: Math.cos(a) * EB_SPEED,
+        vy: Math.sin(a) * EB_SPEED,
+      });
+    }
+  }
+
+  function stepEnemies(dt) {
+    // hp <= 0 판정과 제거·점수 처리를 여기 한 곳으로 모은다. 플레이어 탄
+    // 충돌 루프뿐 아니라 Task 4의 봄도 hp만 깎으면 이 경로로 죽는다.
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      const d = ENEMY_DEF[e.kind];
+      if (e.hp <= 0) {
+        game.score += d.score;
+        if (e.kind === "karakuri" && Math.random() < 0.25) items.push({ x: e.x, y: e.y });
+        enemies.splice(i, 1);
+        continue;
+      }
+      e.t += dt;
+      e.x += d.vx * dt;
+      if (d.amp > 0) e.y = e.y0 + Math.sin(e.t * 2.4) * d.amp;
+      e.fireCd -= dt;
+      if (e.fireCd <= 0 && e.x < W) {
+        if (e.kind === "oni") fireAimed(e.x, e.y + e.h / 2, [0]);
+        else if (e.kind === "karakuri") fireAimed(e.x, e.y + e.h / 2, [-0.25, 0, 0.25]);
+        e.fireCd = d.fire;
+      }
+      if (e.x + e.w < 0) enemies.splice(i, 1);
+    }
+  }
+
+  function stepEbullets(dt) {
+    for (let i = ebullets.length - 1; i >= 0; i--) {
+      const b = ebullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      if (b.x < -16 || b.x > W + 16 || b.y < -16 || b.y > H + 16) ebullets.splice(i, 1);
+    }
+  }
+
+  function stepItems(dt) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      it.x -= 50 * dt;
+      if (it.x + 12 < 0) items.splice(i, 1);
+    }
+  }
+
+  // 적 본체 접촉: 죽지 않는다 — 파워 레벨만 1 내려가고 잠시 무적이 된다.
+  // 원작 텐가이의 비대칭 피격 규칙(죽음은 적 탄에서만 온다).
+  function contactPlayer() {
+    if (player.invuln > 0) return;
+    const hb = playerHit();
+    for (const e of enemies) {
+      if (overlaps(hb, e)) {
+        player.power = Math.max(1, player.power - 1);
+        player.invuln = INVULN_CONTACT;
+        break;
+      }
+    }
+  }
+
+  // 적 탄 피격: 라이프가 줄어드는 유일한 경로.
+  function hitPlayer() {
+    if (player.invuln > 0) return;
+    const hb = playerHit();
+    for (let i = ebullets.length - 1; i >= 0; i--) {
+      const b = ebullets[i];
+      const box = { x: b.x, y: b.y, w: EB_W, h: EB_W };
+      if (overlaps(hb, box)) {
+        ebullets.splice(i, 1);
+        player.lives -= 1;
+        player.x = 60; player.y = H / 2 - PH / 2;
+        player.invuln = INVULN_HIT;
+        if (player.lives <= 0) game.state = "GAMEOVER";
+        break;
+      }
+    }
+  }
+
   function step(dt) {
     if (game.state !== "PLAYING") return;
     game.time += dt;
@@ -275,6 +407,38 @@
       b.x += b.vx * dt;
       if (b.x > W) pbullets.splice(i, 1);
     }
+
+    stepWaves(dt);
+    stepEnemies(dt);
+    stepEbullets(dt);
+    stepItems(dt);
+
+    // 충돌 판정
+    for (let i = pbullets.length - 1; i >= 0; i--) {
+      const b = pbullets[i];
+      let hit = false;
+      for (const e of enemies) {
+        if (overlaps(b, e)) {
+          e.hp -= b.dmg;
+          hit = true;
+          if (!b.pierce) break;
+        }
+      }
+      if (hit && !b.pierce) pbullets.splice(i, 1);
+    }
+
+    contactPlayer();
+    hitPlayer();
+
+    const hb = playerHit();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      const box = { x: it.x, y: it.y, w: 12, h: 12 };
+      if (overlaps(hb, box)) {
+        player.power = Math.min(POWER_MAX, player.power + 1);
+        items.splice(i, 1);
+      }
+    }
   }
 
   // ===== 9. 렌더 =====
@@ -283,11 +447,38 @@
     ctx.fillRect(0, 0, W, H);
     drawParallax();
 
+    drawItems();
+    drawEnemies();
+
     ctx.fillStyle = PALETTE.G;
     for (const b of pbullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
 
+    drawEbullets();
+
     drawPlayer();
     drawHud();
+  }
+
+  function drawEnemies() {
+    for (const e of enemies) {
+      const d = ENEMY_DEF[e.kind];
+      ctx.drawImage(SPR[d.spr], Math.round(e.x), Math.round(e.y));
+    }
+  }
+
+  // 적 탄을 적보다 나중에 그려 탄막이 적 스프라이트에 가려지지 않게 한다.
+  function drawEbullets() {
+    ctx.fillStyle = COLOR.ebullet;
+    for (const b of ebullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), EB_W, EB_W);
+  }
+
+  function drawItems() {
+    for (const it of items) {
+      ctx.fillStyle = PALETTE.G;
+      ctx.fillRect(Math.round(it.x), Math.round(it.y), 12, 12);
+      ctx.fillStyle = PALETTE.D;
+      ctx.fillRect(Math.round(it.x + 4), Math.round(it.y + 4), 4, 4);
+    }
   }
 
   // 원작이 호평받은 요소. 층마다 다른 배율로 스크롤해 깊이를 만든다.
@@ -375,11 +566,14 @@
     invuln: Math.round(player.invuln * 100) / 100,
     pbullets: pbullets.length, ebullets: ebullets.length,
     enemies: enemies.length, items: items.length,
-    waveIdx: game.waveIdx,
+    waveIdx: game.waveIdx, pending: game.pending.length,
   });
 
   // 검증 하니스 전용
   window.__tp = (x, y) => { player.x = x; player.y = y; };
+  // 검증 하니스 전용: 웨이브 시계를 앞으로 돌린다.
+  // 보스 구간(31초)을 헤드리스로 검증하려면 실시간 대기가 불가능하다.
+  window.__skipTo = (sec) => { game.time = sec; };
 
   requestAnimationFrame(frame);
 })();
