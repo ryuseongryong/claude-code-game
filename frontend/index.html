@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Clawd Jump</title>
+<title>TENGAI — 戦国</title>
 <style>
   html, body {
     margin: 0;
@@ -28,22 +28,48 @@
   "use strict";
 
   // ===== 1. 상수 =====
-  const W = 640, H = 360, TILE = 16, CELL = 3;
-  const PW = 36, PH = 24;                 // 플레이어 히트박스 = 스프라이트 박스
-  const MOVE_SPEED = 130, GRAVITY = 1300, JUMP_V = 380, MAX_FALL = 560;
-  const COYOTE_TIME = 0.1, JUMP_BUFFER = 0.1;
+  const W = 640, H = 360, CELL = 3;
   const STEP = 1 / 60, MAX_FRAME = STEP * 5;
 
+  // 플레이어
+  const PW = 36, PH = 36;              // 스프라이트 크기 (MONK 12x12 x 3px)
+  const PHIT = 8;                      // 히트박스 한 변 — 스프라이트 중앙의 8x8
+  const PLAYER_SPEED = 150;
+  const LIVES_START = 3, BOMBS_START = 2, POWER_MAX = 4;
+  const INVULN_HIT = 1.5, INVULN_CONTACT = 0.8;
+
+  // 무장
+  const BEAD_W = 4, BEAD_SPEED = 420, FIRE_INTERVAL = 0.11;
+  const CHARGE_FULL = 0.6;
+  const PHOENIX_W = 24, PHOENIX_H = 12, PHOENIX_SPEED = 560, PHOENIX_DMG = 8;
+  const EB_W = 5, EB_SPEED = 190;
+  const BOMB_SWEEP = 0.5, BOMB_DMG = 30;
+
+  // 배경
+  const SCROLL_BASE = 40;
+
   const COLOR = {
-    bg:         "#1A1917",
-    terrain:    "#3A3631",
-    terrainTop: "#544E46",
-    coin:       "#E8C468",
-    spike:      "#C4463A",
-    flagPole:   "#544E46",
-    flagCloth:  "#6FA88A",
-    hud:        "#E8E2D8",
-    overlay:    "rgba(20, 19, 15, 0.75)",
+    sky:     "#1A1917",
+    far:     "#2A2724",
+    wall:    "#3A3631",
+    wallTop: "#544E46",
+    ebullet: "#C4463A",
+    hud:     "#E8E2D8",
+    overlay: "rgba(20, 19, 15, 0.75)",
+  };
+
+  // 텐가이는 승병이고 승복은 사프란 주황색이다 — 기존 #D97757을 버리지 않고
+  // 의미만 재해석했다.
+  const PALETTE = {
+    D: "#14130F",  // 외곽선
+    S: "#E8C9A0",  // 피부
+    R: "#D97757",  // 승복 (사프란)
+    B: "#8C4A32",  // 승복 그림자
+    G: "#E8C468",  // 금 — 염주 탄, 봉황, 아이템
+    A: "#C4863A",  // 매 깃털
+    P: "#7A4A8C",  // 요괴 살
+    M: "#6B7280",  // 증기 금속
+    C: "#6FA88A",  // 기계 눈
   };
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -64,30 +90,262 @@
   addEventListener("resize", fitCanvas);
   fitCanvas();
 
-  // ===== 3. Clawd 스프라이트 =====
-  // (Task 2)
+  // ===== 3. 스프라이트 =====
+  const SPRITES = {
+    MONK: [            // 12x12 → 36x36. 텐가이(승병), 오른쪽을 향해 난다
+      "....DDD.....",
+      "...DSSSD....",
+      "...DSSSD....",
+      "....DSD.....",
+      "..DDRRRDD...",
+      ".DRRRRRRRD..",
+      "DRRRRRRRRRGG",
+      ".DRRRRRRRD..",
+      "..DRRRRRD...",
+      "...DBBBD....",
+      "....DBD.....",
+      ".....D......",
+    ],
+    HAWK: [            // 7x5 → 21x15. 사역마 매
+      ".D...D.",
+      "DAADAAD",
+      ".AAAAA.",
+      "..AAA..",
+      "...D...",
+    ],
+    ONI: [             // 8x8 → 24x24. 요괴
+      "..DDDD..",
+      ".DPPPPD.",
+      "DPDPPDPD",
+      "DPPPPPPD",
+      "DPPDDPPD",
+      ".DPPPPD.",
+      "..D..D..",
+      ".D....D.",
+    ],
+    KARAKURI: [        // 10x8 → 30x24. 증기 카라쿠리
+      ".DDD..DDD.",
+      "DMMMDDMMMD",
+      "DMCMMMMCMD",
+      "DMMMMMMMMD",
+      ".DMMMMMMD.",
+      "..DMMMMD..",
+      "..D.DD.D..",
+      ".D..DD..D.",
+    ],
+  };
 
-  // ===== 4. 레벨 =====
-  // (Task 4)
+  // 매 프레임 수백 번 fillRect 하는 대신 오프스크린 캔버스에 한 번만 굽는다.
+  // 플랫포머와 달리 좌우 반전본은 굽지 않는다 — 횡스크롤 슈팅에서 모든
+  // 스프라이트는 한 방향만 바라본다.
+  function bake(rows) {
+    const cols = rows[0].length;
+    const off = document.createElement("canvas");
+    off.width = cols * CELL;
+    off.height = rows.length * CELL;
+    const g = off.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < cols; c++) {
+        const color = PALETTE[rows[r][c]];
+        if (!color) continue;                    // "." 는 투명
+        g.fillStyle = color;
+        g.fillRect(c * CELL, r * CELL, CELL, CELL);
+      }
+    }
+    return off;
+  }
+
+  const SPR = {};
+  for (const k in SPRITES) SPR[k] = bake(SPRITES[k]);
 
   // ===== 5. 상태 =====
-  // (Task 3)
+  const player = {
+    x: 60, y: H / 2 - PH / 2,
+    power: 1, lives: LIVES_START, bombs: BOMBS_START,
+    invuln: 0,        // 남은 무적 시간(초)
+    charge: 0,        // 누적 차지(초)
+    fireCd: 0,        // 다음 발사까지 남은 시간(초)
+  };
+
+  const pbullets = [];   // {x, y, w, h, vx, dmg, pierce}
+  const ebullets = [];   // {x, y, vx, vy}
+  const enemies = [];    // {kind, x, y, w, h, hp, t, y0, fireCd, phase?}
+  const items = [];      // {x, y}
+
+  const game = {
+    state: "PLAYING",
+    score: 0,
+    time: 0,           // 웨이브 시계(초)
+    waveIdx: 0,        // 다음에 발동할 WAVES 인덱스
+    pending: [],       // 순차 스폰 대기열 {type, y, left, gap, cd}
+    bombFx: 0,         // 봄 연출 남은 시간(초)
+    scroll: 0,         // 배경 스크롤 누적(px)
+    boss: null,        // Task 4
+    bossTimer: 0,      // Task 4
+  };
+
+  function resetGame() {
+    game.state = "PLAYING";
+    game.score = 0; game.time = 0; game.waveIdx = 0;
+    game.pending.length = 0; game.bombFx = 0; game.scroll = 0;
+    game.boss = null; game.bossTimer = 0;
+    pbullets.length = 0; ebullets.length = 0; enemies.length = 0; items.length = 0;
+    player.x = 60; player.y = H / 2 - PH / 2;
+    player.power = 1; player.lives = LIVES_START; player.bombs = BOMBS_START;
+    player.invuln = 0; player.charge = 0; player.fireCd = 0;
+  }
+  resetGame();
+
+  // 히트박스 헬퍼. 플레이어는 스프라이트 중앙의 작은 정사각형만 판정한다.
+  const playerHit = () => ({
+    x: player.x + (PW - PHIT) / 2, y: player.y + (PH - PHIT) / 2, w: PHIT, h: PHIT,
+  });
+  const overlaps = (a, b) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
   // ===== 6. 입력 =====
-  // (Task 3)
+  const keys = new Set();
+  const HANDLED = new Set([
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+    "KeyZ", "Space", "KeyX", "KeyR",
+  ]);
 
-  // ===== 7. 충돌 =====
-  // (Task 3, Task 4)
+  addEventListener("keydown", (e) => {
+    if (!HANDLED.has(e.code)) return;
+    e.preventDefault();          // 화살표와 Space는 페이지를 스크롤시킨다
+    if (e.repeat) return;
+    keys.add(e.code);
+    if (e.code === "KeyR") resetGame();
+    if (e.code === "KeyX") useBomb();
+  });
 
-  // ===== 8. 물리 스텝 =====
+  addEventListener("keyup", (e) => {
+    if (HANDLED.has(e.code)) keys.delete(e.code);
+  });
+
+  const firing = () => keys.has("KeyZ") || keys.has("Space");
+
+  // ===== 7. 발사 =====
+
+  function fireBeads() {
+    const n = player.power;
+    const bx = player.x + PW - 4;
+    const by = player.y + PH / 2 - BEAD_W / 2;
+    for (let i = 0; i < n; i++) {
+      pbullets.push({
+        x: bx, y: by + (i - (n - 1) / 2) * 9,
+        w: BEAD_W, h: BEAD_W, vx: BEAD_SPEED, dmg: 1, pierce: false,
+      });
+    }
+  }
+
+  function useBomb() {
+    // (Task 4)
+  }
+
+  // ===== 8. 스텝 =====
+
   function step(dt) {
-    // (Task 3)
+    if (game.state !== "PLAYING") return;
+    game.time += dt;
+    game.scroll += SCROLL_BASE * dt;
+    if (player.invuln > 0) player.invuln -= dt;
+
+    // 8방향 이동, 관성 없음. 대각선을 정규화하지 않으면 비스듬히 가는 것이
+    // sqrt(2)배(약 141%) 빨라져 "대각선이 최적"인 버그가 된다.
+    const dx = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
+    const dy = (keys.has("ArrowDown") ? 1 : 0) - (keys.has("ArrowUp") ? 1 : 0);
+    const len = Math.hypot(dx, dy) || 1;
+    player.x = clamp(player.x + (dx / len) * PLAYER_SPEED * dt, 0, W - PW);
+    player.y = clamp(player.y + (dy / len) * PLAYER_SPEED * dt, 0, H - PH);
+
+    // 발사 + 차지. 홀드 중에도 염주는 정상 발사된다 — 홀드하면 발사가
+    // 멈추는 구현은 조작감이 나쁘다.
+    player.fireCd -= dt;
+    if (firing()) {
+      player.charge = Math.min(player.charge + dt, CHARGE_FULL);
+      if (player.fireCd <= 0) { fireBeads(); player.fireCd = FIRE_INTERVAL; }
+    } else {
+      player.charge = 0;                 // Task 4가 만충 시 봉황 발사로 확장
+    }
+
+    for (let i = pbullets.length - 1; i >= 0; i--) {
+      const b = pbullets[i];
+      b.x += b.vx * dt;
+      if (b.x > W) pbullets.splice(i, 1);
+    }
   }
 
   // ===== 9. 렌더 =====
   function render() {
-    ctx.fillStyle = COLOR.bg;
+    ctx.fillStyle = COLOR.sky;
     ctx.fillRect(0, 0, W, H);
+    drawParallax();
+
+    ctx.fillStyle = PALETTE.G;
+    for (const b of pbullets) ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
+
+    drawPlayer();
+    drawHud();
+  }
+
+  // 원작이 호평받은 요소. 층마다 다른 배율로 스크롤해 깊이를 만든다.
+  // 각 층은 모듈러 오프셋으로 무한 반복하고, 좌표는 Math.round로 정수 스냅해
+  // 서브픽셀 렌더로 픽셀아트가 흐려지는 것을 막는다.
+  function drawParallax() {
+    // 원경: 산 실루엣 (0.25x). 경로 채우기는 안티에일리어싱이 생기므로
+    // 1px 바를 쌓아 삼각형을 만든다.
+    ctx.fillStyle = COLOR.far;
+    const fx = -((game.scroll * 0.25) % 160);
+    for (let x = fx - 160; x < W; x += 160) {
+      for (let k = 0; k < 60; k++) {
+        const bw = Math.round((k / 60) * 120);
+        ctx.fillRect(Math.round(x + 80 - bw / 2), 240 + k, bw, 1);
+      }
+    }
+
+    // 중경: 성벽 몸체 + 기와 (0.6x)
+    ctx.fillStyle = COLOR.wall;
+    ctx.fillRect(0, 316, W, H - 316);
+    const mx = -((game.scroll * 0.6) % 96);
+    for (let x = mx - 96; x < W; x += 96) {
+      ctx.fillStyle = COLOR.wall;
+      ctx.fillRect(Math.round(x), 296, 64, 20);
+      ctx.fillStyle = COLOR.wallTop;
+      ctx.fillRect(Math.round(x), 296, 64, 2);
+    }
+
+    // 근경: 지면 상단 눈금 (1.0x)
+    ctx.fillStyle = COLOR.wallTop;
+    const nx = -(game.scroll % 32);
+    for (let x = nx - 32; x < W; x += 32) ctx.fillRect(Math.round(x), 316, 16, 2);
+  }
+
+  function drawPlayer() {
+    // 무적 중에는 점멸시켜 피격을 읽을 수 있게 한다
+    if (player.invuln > 0 && Math.floor(player.invuln * 20) % 2 === 0) return;
+    ctx.drawImage(SPR.MONK, Math.round(player.x), Math.round(player.y));
+    // 사역마는 파워업으로 얻는다(원작 규칙). 파워 2 이상에서만 매가 따라온다.
+    if (player.power >= 2) {
+      ctx.drawImage(
+        SPR.HAWK,
+        Math.round(player.x - 22),
+        Math.round(player.y + 4 + Math.sin(game.time * 4) * 6)
+      );
+    }
+  }
+
+  function drawText(s, x, y, size) {
+    ctx.fillStyle = COLOR.hud;
+    ctx.font = (size || 8) + "px monospace";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(s, x, y);
+  }
+
+  function drawHud() {
+    drawText(`SCORE ${String(game.score).padStart(6, "0")}`, 6, 12);
+    drawText(`LIFE ${player.lives}   BOMB ${player.bombs}   POWER ${player.power}`, 6, 24);
   }
 
   // ===== 10. 루프 + 디버그 훅 =====
@@ -107,7 +365,21 @@
     requestAnimationFrame(frame);
   }
 
-  window.__dbg = () => ({ steps, w: W, h: H, scale });
+  window.__dbg = () => ({
+    steps, w: W, h: H, scale,
+    state: game.state, score: game.score,
+    time: Math.round(game.time * 100) / 100,
+    px: Math.round(player.x), py: Math.round(player.y),
+    power: player.power, lives: player.lives, bombs: player.bombs,
+    charge: Math.round(player.charge * 100) / 100,
+    invuln: Math.round(player.invuln * 100) / 100,
+    pbullets: pbullets.length, ebullets: ebullets.length,
+    enemies: enemies.length, items: items.length,
+    waveIdx: game.waveIdx,
+  });
+
+  // 검증 하니스 전용
+  window.__tp = (x, y) => { player.x = x; player.y = y; };
 
   requestAnimationFrame(frame);
 })();
