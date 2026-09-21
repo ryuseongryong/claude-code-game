@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clawd Jump</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #0B0A09;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="640" height="360"></canvas>
+<script>
+(() => {
+  "use strict";
+
+  // ===== 1. 상수 =====
+  const W = 640, H = 360, TILE = 16, CELL = 3;
+  const PW = 36, PH = 24;                 // 플레이어 히트박스 = 스프라이트 박스
+  const MOVE_SPEED = 130, GRAVITY = 1300, JUMP_V = 380, MAX_FALL = 560;
+  const COYOTE_TIME = 0.1, JUMP_BUFFER = 0.1;
+  const STEP = 1 / 60, MAX_FRAME = STEP * 5;
+
+  const COLOR = {
+    bg:         "#1A1917",
+    terrain:    "#3A3631",
+    terrainTop: "#544E46",
+    coin:       "#E8C468",
+    spike:      "#C4463A",
+    flagPole:   "#544E46",
+    flagCloth:  "#6FA88A",
+    hud:        "#E8E2D8",
+    overlay:    "rgba(20, 19, 15, 0.75)",
+  };
+
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+  // ===== 2. 캔버스 =====
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+
+  let scale = 1;
+  function fitCanvas() {
+    // 정수 배율만 사용한다. 소수 배율은 pixelated 필터에서도 일부 논리 픽셀을
+    // 2px, 일부를 3px로 찍어 스프라이트 두께를 불규칙하게 만든다.
+    scale = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+    canvas.style.width = W * scale + "px";
+    canvas.style.height = H * scale + "px";
+  }
+  addEventListener("resize", fitCanvas);
+  fitCanvas();
+
+  // ===== 3. Clawd 스프라이트 =====
+  // (Task 2)
+
+  // ===== 4. 레벨 =====
+  // (Task 4)
+
+  // ===== 5. 상태 =====
+  // (Task 3)
+
+  // ===== 6. 입력 =====
+  // (Task 3)
+
+  // ===== 7. 충돌 =====
+  // (Task 3, Task 4)
+
+  // ===== 8. 물리 스텝 =====
+  function step(dt) {
+    // (Task 3)
+  }
+
+  // ===== 9. 렌더 =====
+  function render() {
+    ctx.fillStyle = COLOR.bg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ===== 10. 루프 + 디버그 훅 =====
+  let acc = 0, steps = 0, last = performance.now();
+
+  function frame(now) {
+    // 가변 dt를 고정 스텝으로 쪼갠다. MAX_FRAME 상한은 탭 전환 후 복귀 시
+    // 수백 스텝을 따라잡으려다 더 느려지는 "죽음의 나선"을 막는다.
+    acc += Math.min((now - last) / 1000, MAX_FRAME);
+    last = now;
+    while (acc >= STEP) {
+      step(STEP);
+      acc -= STEP;
+      steps++;
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  window.__dbg = () => ({ steps, w: W, h: H, scale });
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
