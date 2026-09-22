@@ -239,14 +239,15 @@
     state: "PLAYING",
     score: 0,
     time: 0,           // 웨이브 시계(초)
-    waveIdx: 0,        // 다음에 발동할 WAVES 인덱스
-    pending: [],       // 순차 스폰 대기열 {type, y, left, gap, cd}
+    waveIdx: 0,        // 다음에 발동할 game.waves 인덱스
+    pending: [],       // 순차 스폰 대기열 {type, ys, idx, gap, cd}
     bombFx: 0,         // 봄 연출 남은 시간(초)
     scroll: 0,         // 배경 스크롤 누적(px)
     boss: null,        // Task 4
     bossTimer: 0,      // Task 4
     cancels: 0,        // Task 1 — 탄 상쇄로 소멸시킨 적탄 수
     charSel: 0,        // TITLE에서 커서로 고르는 CHARS 인덱스
+    stage: 1, act: 1, waves: [], bannerT: 0,
   };
 
   function resetGame() {
@@ -255,6 +256,7 @@
     game.pending.length = 0; game.bombFx = 0; game.scroll = 0;
     game.boss = null; game.bossTimer = 0;
     game.cancels = 0;
+    game.stage = 1; game.act = 1; game.waves = []; game.bannerT = 0;
     pbullets.length = 0; ebullets.length = 0; enemies.length = 0; items.length = 0;
     player.x = 60; player.y = H / 2 - PH / 2;
     player.power = 1; player.lives = LIVES_START; player.bombs = BOMBS_START;
@@ -265,7 +267,21 @@
   // 캐릭터를 고른 뒤 실제 판을 시작한다. resetGame()은 TITLE까지만 되돌린다.
   function startRun(charIdx) {
     player.char = charIdx;
+    enterStage(1);
+  }
+
+  // 스테이지 진입. 보스 스테이지는 웨이브가 없고 즉시 보스를 소환한다.
+  function enterStage(s) {
+    game.stage = s;
+    game.act = Math.ceil(s / 10);
+    game.time = 0;
+    game.waveIdx = 0;
+    game.pending.length = 0;
+    enemies.length = 0; ebullets.length = 0; items.length = 0;
+    game.boss = null; game.bossTimer = 0;
+    game.waves = isBossStage(s) ? [] : buildStage(s);
     game.state = "PLAYING";
+    if (isBossStage(s)) spawnBoss(s);
   }
 
   // 히트박스 헬퍼. 플레이어는 스프라이트 중앙의 작은 정사각형만 판정한다.
@@ -282,21 +298,67 @@
     karakuri: { spr: "KARAKURI", w: 30, h: 24, hp: 8, vx: -60, amp: 0,  fire: 2.2, score: 300 },
   };
 
-  // 타일 맵이 하던 "데이터로 기술된 레벨" 역할을 이 표가 대신한다.
-  // t = 웨이브 발동 시각(초), n = 마리 수, gap = 마리 사이 간격(초)
-  const WAVES = [
-    { t: 1.0,  type: "oni",      y: 100, n: 4, gap: 0.45 },
-    { t: 4.0,  type: "oni",      y: 220, n: 4, gap: 0.45 },
-    { t: 7.5,  type: "karakuri", y: 160, n: 2, gap: 1.2  },
-    // 12.0과 12.5를 붙여 두면 위아래에서 10마리가 동시에 겹쳐 회피 공간이
-    // 사라진다. 시간차를 벌려 순차 협공으로 바꿨다.
-    { t: 12.0, type: "oni",      y: 60,  n: 5, gap: 0.35 },
-    { t: 14.0, type: "oni",      y: 260, n: 5, gap: 0.35 },
-    { t: 18.0, type: "karakuri", y: 110, n: 2, gap: 1.0  },
-    { t: 19.5, type: "karakuri", y: 240, n: 2, gap: 1.0  },
-    { t: 25.0, type: "oni",      y: 180, n: 8, gap: 0.3  },
-    { t: 31.0, type: "boss",     y: 140, n: 1, gap: 0    },
-  ];
+  // 30 스테이지 중 보스 스테이지 3개를 빼면 일반 스테이지가 27개다. 스테이지당
+  // 테이블을 손으로 쓰면 243줄의 반복 데이터가 되고 대부분이 무의미한 변형이 된다.
+  // 편대 패턴을 라이브러리로 두고 스테이지마다 셔플해 뽑는다 — 부수 효과로 원작의
+  // "면 무작위 순서"가 스테이지 단위보다 더 잘게 살아난다.
+  const PATTERNS = {
+    line:   { ys: [140, 140, 140, 140],                     gap: 0.45 },
+    sine:   { ys: [160, 160, 160, 160, 160],                gap: 0.35 },
+    pincer: { ys: [60, 260, 60, 260, 60, 260],              gap: 0.30 },
+    vee:    { ys: [60, 110, 160, 110, 60],                  gap: 0.25 },
+    column: { ys: [100, 140, 180, 220],                     gap: 0.08 },
+    sweep:  { ys: [40, 80, 120, 160, 200, 240, 280],        gap: 0.22 },
+    pair:   { ys: [110, 240],                               gap: 1.00 },
+    swarm:  { ys: [70, 190, 120, 250, 90, 220, 150, 280],   gap: 0.18 },
+  };
+  const PATTERN_KEYS = Object.keys(PATTERNS);
+
+  // 막이 결정하는 것은 적 종류 구성이다.
+  const ACT_TYPES = {
+    1: { def: "oni",      except: { pair: "karakuri" } },
+    2: { def: "karakuri", except: { swarm: "oni", sine: "oni" } },
+    3: { def: null,       except: {} },     // 3막은 패턴 순서에 따라 번갈아
+  };
+
+  // 1막: 요괴의 숲 / 2막: 증기 성곽 / 3막: 천계의 화구.
+  // name은 HUD/배너에 캔버스로 직접 그려지므로 ASCII로 고정한다 — CJK 폰트가
+  // 없는 환경에서는 measureText가 0이 아닌 폭을 돌려주면서 글자만 투명해지는
+  // 침묵 실패가 나기 때문이다(drawTitle 주석과 같은 이유).
+  const ACTS = {
+    1: { name: "YOKAI FOREST",    sky: "#141C18", far: "#1E2A22", wall: "#2C3A30", wallTop: "#465A4C" },
+    2: { name: "STEAM CASTLE",    sky: "#1A1917", far: "#2A2724", wall: "#3A3631", wallTop: "#544E46" },
+    3: { name: "CELESTIAL FORGE", sky: "#22120E", far: "#341A14", wall: "#4A241C", wallTop: "#6E3A2C" },
+  };
+
+  const hpMul  = (s) => 1 + (s - 1) * 0.08;
+  const fireMul = (s) => 1 / (1 + (s - 1) * 0.03);
+  const spdMul = (s) => 1 + (s - 1) * 0.02;
+
+  const isBossStage = (s) => s % 10 === 0;
+
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function makeWave(key, act, s, t) {
+    const p = PATTERNS[key];
+    const cfg = ACT_TYPES[act];
+    let type = cfg.except[key] || cfg.def;
+    if (type === null) type = PATTERN_KEYS.indexOf(key) % 2 === 0 ? "oni" : "karakuri";
+    return { t, type, ys: p.ys.slice(), gap: p.gap };
+  }
+
+  function buildStage(s) {
+    const act = Math.ceil(s / 10);
+    const n = 3 + (s % 3);                       // 패턴 3~5개
+    return shuffle(PATTERN_KEYS.slice()).slice(0, n)
+      .map((key, i) => makeWave(key, act, s, 1.0 + i * 4.0));
+  }
 
   // ===== 6. 입력 =====
   const keys = new Set();
@@ -448,29 +510,41 @@
     return { x: game.boss.x, y: game.boss.y, w: BOSS.w, h: BOSS.h };
   }
 
+  // 보스는 이제 enterStage가 직접 spawnBoss(s)를 부른다 — spawn()은 일반
+  // 웨이브 적만 다룬다. 난이도 배율은 스테이지 번호(game.stage) 하나에서
+  // 파생되며, tier(적탄 단계)는 스케일하지 않는다 — 올리면 후반에 상쇄가 죽는다.
   function spawn(type, y) {
-    if (type === "boss") { spawnBoss(); return; }
     const d = ENEMY_DEF[type];
-    enemies.push({ kind: type, x: W, y, y0: y, w: d.w, h: d.h, hp: d.hp, t: 0, fireCd: d.fire });
+    if (!d) return;
+    const s = game.stage;
+    enemies.push({
+      kind: type, x: W, y, y0: y, w: d.w, h: d.h,
+      hp: Math.ceil(d.hp * hpMul(s)),
+      vx: d.vx * spdMul(s),
+      fire: d.fire * fireMul(s),
+      fireCd: d.fire * fireMul(s),
+      t: 0,
+    });
   }
 
   function stepWaves(dt) {
-    // 한 프레임에 여러 웨이브가 동시에 발동할 수 있다(12.0초와 12.5초처럼
-    // 가까운 두 웨이브의 동시 상하 공격은 의도된 것이다).
-    while (game.waveIdx < WAVES.length && game.time >= WAVES[game.waveIdx].t) {
-      const w = WAVES[game.waveIdx];
-      game.pending.push({ type: w.type, y: w.y, left: w.n, gap: w.gap, cd: 0 });
+    // 한 프레임에 여러 웨이브가 동시에 발동할 수 있다 — buildStage가 만드는
+    // t 오프셋(1.0 + i*4.0)은 보통 겹치지 않지만, 그 전제가 깨져도 while로
+    // 소비해야 밀린 웨이브가 한 프레임에 유실 없이 전부 대기열에 들어간다.
+    const ws = game.waves;
+    while (game.waveIdx < ws.length && game.time >= ws[game.waveIdx].t) {
+      const w = ws[game.waveIdx];
+      game.pending.push({ type: w.type, ys: w.ys, idx: 0, gap: w.gap, cd: 0 });
       game.waveIdx++;
     }
     for (let i = game.pending.length - 1; i >= 0; i--) {
-      const p = game.pending[i];
-      p.cd -= dt;
-      if (p.cd <= 0) {
-        spawn(p.type, p.y);
-        p.left--;
-        p.cd = p.gap;
-        if (p.left === 0) game.pending.splice(i, 1);
-      }
+      const q = game.pending[i];
+      q.cd -= dt;
+      if (q.cd > 0) continue;
+      spawn(q.type, q.ys[q.idx]);
+      q.idx++;
+      q.cd = q.gap;
+      if (q.idx >= q.ys.length) game.pending.splice(i, 1);
     }
   }
 
@@ -501,13 +575,13 @@
         continue;
       }
       e.t += dt;
-      e.x += d.vx * dt;
+      e.x += e.vx * dt;
       if (d.amp > 0) e.y = e.y0 + Math.sin(e.t * 2.4) * d.amp;
       e.fireCd -= dt;
       if (e.fireCd <= 0 && e.x < W) {
         if (e.kind === "oni") fireAimed(e.x, e.y + e.h / 2, [0]);
         else if (e.kind === "karakuri") fireAimed(e.x, e.y + e.h / 2, [-0.25, 0, 0.25]);
-        e.fireCd = d.fire;
+        e.fireCd = e.fire;
       }
       if (e.x + e.w < 0) enemies.splice(i, 1);
     }
@@ -538,7 +612,7 @@
     // stepBoss가 다시 불렸을 때 시간 초과(BADEND) 판정이 먼저 걸려버리면
     // 제한 시간 내의 격파가 배드 엔딩으로 뒤집힌다. 죽었으면 시계를 보지 않는다.
     if (b.hp <= 0) {
-      game.state = "CLEAR";
+      advanceStage();
       game.score += 5000 + player.bombs * 1000;
       game.boss = null;
       return;
@@ -641,6 +715,11 @@
   }
 
   function step(dt) {
+    if (game.state === "STAGEBANNER") {
+      game.bannerT -= dt;
+      if (game.bannerT <= 0) enterStage(game.stage + 1);
+      return;
+    }
     if (game.state !== "PLAYING") return;
     game.time += dt;
     game.scroll += SCROLL_BASE * dt;
@@ -742,12 +821,33 @@
         items.splice(i, 1);
       }
     }
+
+    checkStageClear();
+  }
+
+  function checkStageClear() {
+    if (game.state !== "PLAYING") return;
+    if (isBossStage(game.stage)) return;      // 보스 격파는 stepBoss가 처리
+    if (game.waveIdx < game.waves.length) return;
+    if (game.pending.length > 0) return;
+    if (enemies.length > 0) return;
+    advanceStage();
+  }
+
+  // 배너는 0.8초다. 30번 나오므로 2초면 총 1분이 배너에 쓰인다.
+  function advanceStage() {
+    if (game.stage >= 30) { game.state = "CLEAR"; return; }
+    game.state = "STAGEBANNER";
+    game.bannerT = 0.8;
   }
 
   // ===== 9. 렌더 =====
+  // 막별 배경. 전역 COLOR를 변형하지 않고 호출 시점에 game.act로 조회한다.
+  const actColors = () => ACTS[game.act] || ACTS[2];
+
   function render() {
     if (game.state === "TITLE") { drawTitle(); return; }
-    ctx.fillStyle = COLOR.sky;
+    ctx.fillStyle = actColors().sky;
     ctx.fillRect(0, 0, W, H);
     drawParallax();
 
@@ -772,7 +872,16 @@
     drawPlayer();
     drawHud();
     drawBossHud();    // 판정용 HP/TIME 표시는 플레이어와 탄보다 위, HUD와 같은 층
+    drawBanner();     // 스테이지 전환 배너
     drawOverlay();    // 오버레이는 가장 마지막(HUD 뒤)에 그린다
+  }
+
+  function drawBanner() {
+    if (game.state !== "STAGEBANNER") return;
+    ctx.fillStyle = COLOR.overlay;
+    ctx.fillRect(0, 150, W, 60);
+    drawCentered(`STAGE ${game.stage + 1}`, 180, 20);
+    drawCentered(ACTS[Math.ceil((game.stage + 1) / 10)].name, 200, 10);
   }
 
   function drawEnemies() {
@@ -862,9 +971,10 @@
   // 각 층은 모듈러 오프셋으로 무한 반복하고, 좌표는 Math.round로 정수 스냅해
   // 서브픽셀 렌더로 픽셀아트가 흐려지는 것을 막는다.
   function drawParallax() {
+    const act = actColors();
     // 원경: 산 실루엣 (0.25x). 경로 채우기는 안티에일리어싱이 생기므로
     // 1px 바를 쌓아 삼각형을 만든다.
-    ctx.fillStyle = COLOR.far;
+    ctx.fillStyle = act.far;
     const fx = -((game.scroll * 0.25) % 160);
     for (let x = fx - 160; x < W; x += 160) {
       for (let k = 0; k < 60; k++) {
@@ -874,18 +984,18 @@
     }
 
     // 중경: 성벽 몸체 + 기와 (0.6x)
-    ctx.fillStyle = COLOR.wall;
+    ctx.fillStyle = act.wall;
     ctx.fillRect(0, 316, W, H - 316);
     const mx = -((game.scroll * 0.6) % 96);
     for (let x = mx - 96; x < W; x += 96) {
-      ctx.fillStyle = COLOR.wall;
+      ctx.fillStyle = act.wall;
       ctx.fillRect(Math.round(x), 296, 64, 20);
-      ctx.fillStyle = COLOR.wallTop;
+      ctx.fillStyle = act.wallTop;
       ctx.fillRect(Math.round(x), 296, 64, 2);
     }
 
     // 근경: 지면 상단 눈금 (1.0x)
-    ctx.fillStyle = COLOR.wallTop;
+    ctx.fillStyle = act.wallTop;
     const nx = -(game.scroll % 32);
     for (let x = nx - 32; x < W; x += 32) ctx.fillRect(Math.round(x), 316, 16, 2);
   }
@@ -915,6 +1025,7 @@
   function drawHud() {
     drawText(`SCORE ${String(game.score).padStart(6, "0")}`, 6, 12);
     drawText(`LIFE ${player.lives}   BOMB ${player.bombs}   POWER ${player.power}`, 6, 24);
+    drawText(`STAGE ${game.stage}/30   ${actColors().name}`, 6, 36);
     // 조작 안내. HUD에 BOMB 개수는 보이지만 그게 X 키라는 힌트가 없어서
     // 플레이 테스트에서 봄을 모르고 플레이하는 일이 생겼다. 타이틀 화면이
     // 없는 동안은 화면에 상시 표시하는 것이 유일한 전달 수단이다.
@@ -963,7 +1074,7 @@
       drawCentered("PRESS R TO RESTART", 210, 10);
     } else if (game.state === "BADEND") {
       drawCentered("BAD END", 160, 20);
-      drawCentered("보스를 시간 내에 쓰러뜨리지 못했다", 190, 10);
+      drawCentered("TIME UP - THE BOSS SURVIVED", 190, 10);
       drawCentered("PRESS R TO RESTART", 210, 10);
     } else if (game.state === "GAMEOVER") {
       drawCentered("GAME OVER", 160, 20);
@@ -1006,10 +1117,20 @@
     bombFx: Math.round(game.bombFx * 100) / 100,
     cancels: game.cancels,
     char: player.char, charSel: game.charSel,
+    stage: game.stage, act: game.act, waves: game.waves.length,
   });
 
   // 검증 하니스 전용: 캐릭터를 골라 판을 시작한다
   window.__pick = (i) => { game.charSel = i; startRun(i); };
+
+  // 검증 하니스 전용: 임의 스테이지로 즉시 진입한다. 30 스테이지를 실제로
+  // 플레이해 후반에 도달하는 것은 헤드리스로 불가능하다.
+  window.__stage = (s) => { enterStage(s); };
+  // 검증 하니스 전용
+  window.__stageWaves = (s) => buildStage(s).map((w) => w.type + ":" + w.ys.length);
+  window.__scaling = (list) => list.map((s) => ({
+    s, hp: +hpMul(s).toFixed(2), fire: +fireMul(s).toFixed(2), spd: +spdMul(s).toFixed(2),
+  }));
 
   // 검증 하니스 전용
   window.__tp = (x, y) => { player.x = x; player.y = y; };
