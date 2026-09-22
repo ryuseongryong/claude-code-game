@@ -35,14 +35,19 @@
   const PW = 36, PH = 36;              // 스프라이트 크기 (MONK 12x12 x 3px)
   const PHIT = 8;                      // 히트박스 한 변 — 스프라이트 중앙의 8x8
   const PLAYER_SPEED = 150;
-  const LIVES_START = 3, BOMBS_START = 2, POWER_MAX = 4;
-  const INVULN_HIT = 1.5, INVULN_CONTACT = 0.8;
+  // 라이프/봄은 밀도와 무관한 순수 관용성 손잡이다. 플레이 테스트에서
+  // 회피 AI가 보스(31초)에 도달하지 못해 3/2로는 부족했다.
+  const LIVES_START = 4, BOMBS_START = 3, POWER_MAX = 4;
+  const INVULN_HIT = 2.0, INVULN_CONTACT = 0.8;
 
   // 무장
   const BEAD_W = 4, BEAD_SPEED = 420, FIRE_INTERVAL = 0.11;
   const CHARGE_FULL = 0.6;
   const PHOENIX_W = 24, PHOENIX_H = 12, PHOENIX_SPEED = 560, PHOENIX_DMG = 8;
-  const EB_W = 5, EB_SPEED = 190;
+  // 적 탄 속도는 PLAYER_SPEED(150)를 넘기지 않는다. 190이면 1.27배라 조준탄을
+  // 달려서 피할 수 없어 "회피 불가"로 느껴진다 — 플레이 테스트에서 회피하는
+  // 플레이어가 16초에 전멸하고 31초의 보스에 도달조차 못 했다.
+  const EB_W = 5, EB_SPEED = 150;
   const BOMB_SWEEP = 0.5, BOMB_DMG = 30;
 
   // 배경
@@ -210,8 +215,10 @@
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
   const ENEMY_DEF = {
-    oni:      { spr: "ONI",      w: 24, h: 24, hp: 3, vx: -90, amp: 28, fire: 1.4, score: 100 },
-    karakuri: { spr: "KARAKURI", w: 30, h: 24, hp: 8, vx: -60, amp: 0,  fire: 1.8, score: 300 },
+    // fire 간격은 화면에 몰리는 마리 수를 감안한 값이다. oni 1.4s는 8마리가
+    // 겹칠 때 초당 5.7발의 조준탄이 플레이어로 수렴해 과했다.
+    oni:      { spr: "ONI",      w: 24, h: 24, hp: 3, vx: -90, amp: 28, fire: 2.0, score: 100 },
+    karakuri: { spr: "KARAKURI", w: 30, h: 24, hp: 8, vx: -60, amp: 0,  fire: 2.2, score: 300 },
   };
 
   // 타일 맵이 하던 "데이터로 기술된 레벨" 역할을 이 표가 대신한다.
@@ -220,10 +227,12 @@
     { t: 1.0,  type: "oni",      y: 100, n: 4, gap: 0.45 },
     { t: 4.0,  type: "oni",      y: 220, n: 4, gap: 0.45 },
     { t: 7.5,  type: "karakuri", y: 160, n: 2, gap: 1.2  },
+    // 12.0과 12.5를 붙여 두면 위아래에서 10마리가 동시에 겹쳐 회피 공간이
+    // 사라진다. 시간차를 벌려 순차 협공으로 바꿨다.
     { t: 12.0, type: "oni",      y: 60,  n: 5, gap: 0.35 },
-    { t: 12.5, type: "oni",      y: 260, n: 5, gap: 0.35 },
+    { t: 14.0, type: "oni",      y: 260, n: 5, gap: 0.35 },
     { t: 18.0, type: "karakuri", y: 110, n: 2, gap: 1.0  },
-    { t: 18.5, type: "karakuri", y: 240, n: 2, gap: 1.0  },
+    { t: 19.5, type: "karakuri", y: 240, n: 2, gap: 1.0  },
     { t: 25.0, type: "oni",      y: 180, n: 8, gap: 0.3  },
     { t: 31.0, type: "boss",     y: 140, n: 1, gap: 0    },
   ];
@@ -726,6 +735,10 @@
   function drawHud() {
     drawText(`SCORE ${String(game.score).padStart(6, "0")}`, 6, 12);
     drawText(`LIFE ${player.lives}   BOMB ${player.bombs}   POWER ${player.power}`, 6, 24);
+    // 조작 안내. HUD에 BOMB 개수는 보이지만 그게 X 키라는 힌트가 없어서
+    // 플레이 테스트에서 봄을 모르고 플레이하는 일이 생겼다. 타이틀 화면이
+    // 없는 동안은 화면에 상시 표시하는 것이 유일한 전달 수단이다.
+    drawText("ARROWS MOVE    Z FIRE (HOLD=CHARGE)    X BOMB    R RESTART", 6, H - 6);
   }
 
   function drawCentered(s, y, size) {
