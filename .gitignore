@@ -1,5 +1,6 @@
 *.js
 !jest.config.js
+!tools/verify.js
 *.d.ts
 node_modules
 
