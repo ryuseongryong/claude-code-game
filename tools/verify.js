@@ -18,7 +18,6 @@ function resolvePlaywright() {
     process.env.CJ_PW,
     'playwright-core',
     'playwright',
-    '/tmp/pw/node_modules/playwright-core',
   ].filter(Boolean);
   for (const c of candidates) {
     try { return require(c); } catch (_) { /* 다음 후보 */ }
@@ -448,6 +447,65 @@ const scenarios = {
     await api.wait(page, 500);
     const playing = await api.dbg(page);
     return { dbg, playing };
+  },
+
+  // Fix Round 1 — memoryAct가 읽기 경로에서 단조성을 잃는 회귀를 잡는다.
+  // 결함(수정 전): loadProgress()가 디스크 값이 유효하면 memoryAct와 비교 없이
+  // 그대로 반환했다. "저장 성공 → 저장 실패(디스크가 낡음) → resetGame()"의
+  // 순서를 밟으면, 세션 내에서 이미 3막까지 해금됐는데도 resetGame()이 낡은
+  // 디스크 값(2)을 그대로 읽어와 3막 해금이 사라진다 — 이 기능이 "저장이 안
+  // 돼도 게임은 정상 진행해야 한다"를 위해 존재하는데, 정확히 그 상황(저장
+  // 실패)에서 무력화되는 아이러니. KeyR(죽을 때마다 누르는 경로)로 재현된다.
+  //
+  // 참고: __progress().stored는 loadProgress()를 그대로 호출한다. 수정 후
+  // loadProgress()는 "디스크를 memoryAct에 흡수시키고 memoryAct를 반환"하므로,
+  // saveProgress(3)이 disk 쓰기 실패와 무관하게 memoryAct를 먼저 3으로 올려
+  // 두면 그 즉시 stored도 3으로 보인다(더 이상 "디스크 원본 값"이 아니라
+  // "세션 내 단조 진실원"이다 — 그게 이 수정의 목적이다). 그래서 disk에 실제
+  // 무엇이 적혀 있는지는 localStorage.getItem을 직접 읽어(diskRaw) 별도로
+  // 확인한다 — 그래야 "쓰기가 진짜로 실패했다"와 "그런데도 다운그레이드가
+  // 안 된다"를 동시에 증명할 수 있다.
+  checkpointMonotonic: async (page) => {
+    await page.evaluate(() => window.__pick(0));
+    await page.evaluate(() => window.__stage(10));
+    await api.wait(page, 200);
+    await page.evaluate(() => window.__killBoss());   // 저장 성공 → disk={"act":2}
+    await api.wait(page, 200);
+    const afterAct1 = await page.evaluate(() => window.__progress());
+    const diskAfterAct1 = await page.evaluate(() => localStorage.getItem('jjapgai.progress'));
+
+    // setItem만 막는다(getItem은 살려 둔다). localStorage 인스턴스의 own
+    // 프로퍼티로 덮어써서 Storage.prototype을 건드리지 않으므로
+    // sessionStorage(공통 초기화의 클리어-플래그가 쓴다)는 영향받지 않는다.
+    // 현재 세션에 즉시 적용되므로 리로드가 필요 없다(addInitScript는 다음
+    // 내비게이션에야 적용되므로 이 시나리오처럼 리로드 없이 중간에 막으려면
+    // 직접 패치해야 한다).
+    await page.evaluate(() => {
+      localStorage.setItem = () => { throw new Error('blocked'); };
+    });
+
+    await page.evaluate(() => window.__stage(20));
+    await api.wait(page, 200);
+    await page.evaluate(() => window.__killBoss());   // 저장 실패 → disk는 2에 멈춤, memoryAct는 3
+    await api.wait(page, 200);
+    const afterAct2 = await page.evaluate(() => window.__progress());
+    const diskAfterAct2 = await page.evaluate(() => localStorage.getItem('jjapgai.progress'));
+
+    await page.keyboard.press('KeyR');                // resetGame() — 죽을 때마다 밟는 경로
+    await api.wait(page, 100);
+    const afterReset = await api.dbg(page);
+
+    // 핵심 회귀 단정: resetGame() 이후 unlocked가 격파 직후보다 떨어지면
+    // (디스크가 낡아 다운그레이드) 즉시 실패시킨다. 수정 전에는 여기서
+    // afterReset.unlocked === 2 (afterAct2.unlocked === 3에서 다운그레이드).
+    if (afterReset.unlocked < afterAct2.unlocked) {
+      throw new Error(
+        `checkpoint downgraded on resetGame(): unlocked ${afterAct2.unlocked} -> ${afterReset.unlocked} ` +
+        `(disk stuck at ${diskAfterAct2})`
+      );
+    }
+
+    return { afterAct1, diskAfterAct1, afterAct2, diskAfterAct2, afterReset };
   },
 };
 

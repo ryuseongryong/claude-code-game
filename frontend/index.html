@@ -262,13 +262,16 @@
   function loadProgress() {
     try {
       const raw = localStorage.getItem(PROGRESS_KEY);
-      if (!raw) return memoryAct;
-      const v = JSON.parse(raw);
-      const a = Number(v && v.act);
-      return a >= 1 && a <= 3 ? Math.floor(a) : memoryAct;
-    } catch (_) {
-      return memoryAct;
-    }
+      if (raw) {
+        const v = JSON.parse(raw);
+        const a = Number(v && v.act);
+        // 디스크 값도 memoryAct 를 통과시킨다. 그대로 반환하면 저장이 실패해
+        // 디스크가 낡은 상황에서 세션 내 해금이 다운그레이드된다 — 이 기능이
+        // 존재하는 이유가 바로 그 상황이므로 치명적이다.
+        if (a >= 1 && a <= 3) memoryAct = Math.max(memoryAct, Math.floor(a));
+      }
+    } catch (_) { /* 메모리 폴백으로 충분하다 */ }
+    return memoryAct;
   }
 
   function saveProgress(act) {
