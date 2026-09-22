@@ -175,9 +175,17 @@ const scenarios = {
     const fired = await api.dbg(page);
     await api.shot(page, 'player');
     const diagRatio = +(diagX / pureX).toFixed(2);
-    // 1/sqrt(2) ~= 0.7071 — 대각선 정규화가 되어 있으면 순수 우향 이동의
-    // 68~73% 만큼만 x가 나가야 한다(정규화가 없으면 1.0 근처가 나온다).
-    api.check('player.diagRatio in 0.68..0.73', diagRatio >= 0.68 && diagRatio <= 0.73, diagRatio);
+    // Fix Round 2: 비율(diagRatio)에 좁은 밴드를 씌우면 __dbg의 px 정수 반올림이
+    // 만드는 양자화(1/pureX 단위, 여기선 약 0.0133)가 비율에 그대로 실려 flaky해진다
+    // (실측: 동일 코드 6회 중 1회, diagX=56/pureX=75=0.747로 0.68..0.73 밖). 노이즈가
+    // 실제로 존재하는 차원(픽셀)에서 직접 단정한다: diagX는 이론상 pureX/sqrt(2)여야
+    // 하고, 실측(동일 코드 6회) 편차는 최대 +3px(pureX 75~78, diagX 53~56)였다. 정규화가
+    // 빠지면 diagX===pureX가 되어 편차가 약 +22px이므로, ±4px는 지터를 흡수하면서도
+    // 버그와 5배 이상 떨어져 있어 여전히 확실히 잡는다.
+    const theoDiagX = pureX / Math.SQRT2;
+    api.check('player.diagX near pureX/sqrt2 (+-4px)',
+      Math.abs(diagX - theoDiagX) <= 4,
+      `diagX=${diagX} theo=${theoDiagX.toFixed(1)} pureX=${pureX}`);
     api.check('player.fired.pbullets > 0', fired.pbullets > 0, fired.pbullets);
     return { start, clamped, clampedTL, pureX, diagX, diagRatio, fired };
   },
