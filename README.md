@@ -97,6 +97,7 @@ OAC(Origin Access Control)는 CloudFront만 버킷을 읽는 서명된 요청을
 ```
 frontend/index.html          게임 전체 (HTML + CSS + JS 인라인)
 tools/verify.js              검증 하니스 (헤드리스 브라우저, 시나리오 15개 / 단정 75개)
+tools/verify-all.js          전체 실행 러너 (`npm test`). 서버 기동·정리, 단정 집계
 lib/clawd-jump-stack.ts      S3(비공개) + CloudFront(OAC) + BucketDeployment
 bin/clawd-jump.ts            CDK 엔트리포인트
 docs/superpowers/specs/      설계 문서
@@ -110,10 +111,24 @@ docs/superpowers/plans/      구현 계획
 `window.__dbg()` 등 훅은 이 하니스를 위해 존재합니다.
 
 ```bash
+npm install && npx playwright install chromium   # 최초 1회 (chromium 바이너리는 별도)
+npm test                                          # 전체 15개. 정적 서버까지 직접 띄운다
+```
+
+```
+짭가이 검증 — 시나리오 15개
+  PASS  loop                   1.3s 단정 4/4
+  ...
+PASS  시나리오 15/15, 단정 75개, 98.6s
+```
+
+`npm test` = `tools/verify-all.js`. 하나만 돌리거나 배포본을 검사할 때는:
+
+```bash
 cd frontend && python3 -m http.server 8000 &
-npm i --no-save playwright-core && npx playwright install chromium
-node tools/verify.js player          # 시나리오 하나
-CJ_URL=https://<dist>.cloudfront.net/index.html node tools/verify.js player   # 배포본 검증
+node tools/verify.js player                        # 시나리오 하나
+CJ_ONLY=player,combat npm test                     # 일부만
+CJ_URL=https://<dist>.cloudfront.net/index.html npm test   # 배포본 검증
 ```
 
 실패한 단정이 있으면 이름과 함께 exit 1 을 냅니다. 이건 **나중에 고친 것**입니다 — 처음
@@ -146,6 +161,8 @@ CJ_URL=https://<dist>.cloudfront.net/index.html node tools/verify.js player   # 
 - **`measureText` 는 글리프가 없어도 폭을 반환한다**. 그래서 CJK 폰트가 없는 환경에서 중앙 정렬 산수는 완벽히 동작하는데 글자만 투명해집니다. 예외도 콘솔 에러도 없는 침묵 실패라, 코드 리뷰로는 잡히지 않고 잉크 픽셀을 세야 드러납니다.
 - **부정 목록 가드는 상태가 추가될 때 조용히 틀린 기본값을 준다**. `if (state !== "PLAYING") return;` 은 상태가 4개일 때 완전한 가드였는데, 다섯 번째 상태(`STAGEBANNER`)가 추가된 순간 그 한 줄도 바뀌지 않은 채 틀려졌습니다 — 배너와 HUD에 전체화면 딤이 두 번 걸려 대비가 2.0:1 로 떨어졌습니다. 긍정 목록(`CLEAR`/`BADEND`/`GAMEOVER`)은 같은 실수를 구조적으로 막습니다.
 - **대상이 등장하지 않아서 통과하는 테스트는 실패하는 테스트보다 나쁘다**. 실패는 눈에 보이지만 거짓 통과는 보이지 않습니다. 보스를 소환하던 디버그 훅이 바뀌어 보스가 전혀 안 뜨는데도 통과하던 시나리오가 둘 있었습니다.
+- **가장 위험한 거짓 통과는 가장 관습적인 명령에 숨어 있었다**. `npm test` 가 오랫동안 `Tests: 1 passed` 를 냈습니다. 그 하나는 CDK 스캐폴드가 남긴 `test('SQS Queue Created', ...)` 였고 **본문 전체가 주석**이었으며 이 프로젝트에는 SQS가 없습니다. 0개의 단정으로 초록불을 주던 셈입니다. 위의 두 사례(봄 직후 `ebullets === 0`, 보스 없는 보스 시나리오)와 같은 계열이지만, 새로 온 사람이 **가장 먼저 치는 명령**이라는 점에서 가장 나빴습니다. 게다가 그동안 진짜 게이트(단정 75개)는 **아무것도 자동으로 호출하지 않았습니다** — 수동으로 15번 실행해야만 걸렸습니다. 지금은 `npm test` 가 `tools/verify-all.js` 로 전체를 돌립니다.
+- **`--no-save` 로 설치한 의존은 다음 `npm install` 이 조용히 지운다**. 하니스가 `npm i --no-save playwright-core` 를 안내했는데, `--no-save` 는 `package.json` 에 기록하지 않으므로 이후 어떤 `npm install` 이든 그것을 선언되지 않은 잉여로 보고 prune 합니다. 실제로 락파일을 동기화하는 순간 사라졌습니다. 아무것도 검증하지 않는 초록불을 **돌 수 없는 빨간불**로 바꾸는 것도 게이트가 아니라서, `playwright-core` 를 정식 `devDependencies` 로 선언했습니다. 러너는 모듈 누락과 chromium 바이너리 누락을 **프리플라이트에서 한 번** 잡습니다 — 없으면 같은 실패가 시나리오마다 15번 반복되어 원인이 묻힙니다.
 - **flaky 한 게이트는 게이트가 없는 것보다 나쁠 수 있다**. 대각선 정규화 검사에 비율 밴드(`0.68..0.73`)를 씌웠더니 동일 코드 6회 중 1회 실패했습니다 — `px` 가 정수로 반올림되어 비율이 `1/75` 단위로 양자화되기 때문입니다. **노이즈가 존재하는 차원(픽셀)에서 단정**하고, 허용치를 고를 때 **버그 상태와의 거리**를 근거로 삼아야 합니다(정규화가 빠지면 편차 +22px 이므로 ±4px 는 5배 여유).
 - **계획은 권위가 아니라 검증 대상이다**. v2 개발 중 계획·스펙 쪽이 틀린 것이 **8건** 나왔고 전부 구현자나 리뷰어가 잡았습니다 — 산수적으로 불가능한 기대값, 판정이 반대로 된 임계값, 좌표 충돌, 계수 오류, 테스트가 스스로를 무력화하는 지시 등. 매 작업 지시에 "기대값이 실제와 다르면 고쳐 맞추지 말고 어느 쪽이 틀렸는지 근거와 함께 보고하라"를 넣은 것이 이걸 드러냈습니다.
 

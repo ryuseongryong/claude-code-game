@@ -4,9 +4,15 @@
 // 자동 검증 수단이며, 게임 코드의 window.__dbg() 등 훅은 이 파일을 위해 존재한다.
 //
 // 사용법:
+//   npm test                       전체 15개 (tools/verify-all.js 가 서버까지 띄운다)
+//   node tools/verify.js <이름>    하나만
+//   node tools/verify.js --list    시나리오 이름 목록 (러너가 쓰는 단일 출처)
+//
+// 최초 1회 설치 (chromium 바이너리는 npm 의존으로 담을 수 없어 별도다):
+//   npm install && npx playwright install chromium
+//
+// 하나만 돌릴 때는 서버를 직접 띄워야 한다 (npm test 는 러너가 알아서 띄운다):
 //   cd frontend && python3 -m http.server 8000 &
-//   npm i --no-save playwright-core && npx playwright install chromium
-//   node tools/verify.js <시나리오이름>
 //
 // 환경변수:
 //   CJ_URL  검사할 URL (기본 http://localhost:8000/index.html)
@@ -22,12 +28,15 @@ function resolvePlaywright() {
   for (const c of candidates) {
     try { return require(c); } catch (_) { /* 다음 후보 */ }
   }
+  // --no-save 를 안내하지 않는다 — package.json 에 기록되지 않아 다음 npm install 이
+  // 조용히 prune 하고, 그 순간 이 프로젝트의 유일한 검증 수단이 실행 불가가 된다.
   throw new Error(
-    'playwright-core를 찾을 수 없다. `npm i --no-save playwright-core` 후 ' +
+    'playwright-core를 찾을 수 없다. `npm install` 후 ' +
     '`npx playwright install chromium` 을 실행하거나 CJ_PW로 경로를 지정하라.'
   );
 }
-const { chromium } = resolvePlaywright();
+// resolvePlaywright()는 지연 호출한다 — 최상단에서 부르면 `--list` 조차 playwright
+// 없이는 못 돌아가고, 러너가 "playwright 없음"을 시나리오마다 15번 반복 보고한다.
 
 const URL = process.env.CJ_URL || 'http://localhost:8000/index.html';
 
@@ -687,11 +696,19 @@ const scenarios = {
 
 (async () => {
   const name = process.argv[2];
+  // 시나리오 목록의 단일 출처. tools/verify-all.js 가 이걸 읽는다 — 러너에 목록을
+  // 복제하면 새로 추가한 시나리오가 전체 실행에서 조용히 빠진다. 그건 이 하니스가
+  // 이미 한 번 당한 결함("대상이 없어서 통과")과 같은 계열이다.
+  if (name === '--list') {
+    console.log(Object.keys(scenarios).join('\n'));
+    return;
+  }
   const scenario = scenarios[name];
   if (!scenario) {
     console.error(`unknown scenario "${name}". available: ${Object.keys(scenarios).join(', ')}`);
     process.exit(2);
   }
+  const { chromium } = resolvePlaywright();
   const browser = await chromium.launch({ args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];

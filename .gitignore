@@ -1,6 +1,9 @@
+# CDK 스캐폴드의 규칙이다 — tsc 산출물(.js)을 커밋하지 않기 위한 것이라 tools/ 의
+# 손으로 쓴 스크립트까지 삼킨다. git add 는 무시된 파일에 대해 에러도 내지 않고
+# 스테이징도 하지 않으므로, 예외를 빠뜨리면 조용히 커밋에서 사라진다.
 *.js
-!jest.config.js
 !tools/verify.js
+!tools/verify-all.js
 *.d.ts
 node_modules
 
