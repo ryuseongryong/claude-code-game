@@ -50,6 +50,12 @@
   const EB_W = 5, EB_SPEED = 150;
   const BOMB_SWEEP = 0.5, BOMB_DMG = 30;
 
+  // 캐릭터별 무장 (텐가이는 기존 BEAD_*/PHOENIX_* 를 그대로 쓴다)
+  const OFUDA_INTERVAL = 0.13, OFUDA_SPREAD = 0.22;   // 코요리 주무장
+  const ORB_SPEED = 300, ORB_DMG = 6, ORB_TURN = 3.0; // 코요리 차지 (유도)
+  const SPEAR_INTERVAL = 0.20, SPEAR_SPEED = 480, SPEAR_DMG = 2;  // 하가네 주무장
+  const BIGSPEAR_W = 30, BIGSPEAR_H = 10, BIGSPEAR_DMG = 12;      // 하가네 차지
+
   // 배경
   const SCROLL_BASE = 40;
 
@@ -75,6 +81,9 @@
     P: "#7A4A8C",  // 요괴 살
     M: "#6B7280",  // 증기 금속
     C: "#6FA88A",  // 기계 눈
+    N: "#E8E2D8",  // 무녀 흰 상의
+    V: "#B83A3A",  // 무녀 주홍 하카마
+    L: "#5A8FB8",  // 물의 정령
   };
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -143,6 +152,48 @@
       "..D.DD.D..",
       ".D..DD..D.",
     ],
+    KOYORI: [          // 12x12 → 36x36. 무녀 코요리
+      "....DDD.....",
+      "...DSSSD....",
+      "...DSSSD....",
+      "..DDSSSDD...",
+      ".DNNNNNND...",
+      "DNNNNNNNNDGG",
+      ".DNNNNNND...",
+      "..DVVVVD....",
+      "..DVVVVD....",
+      "..DVVVVD....",
+      "...DVVD.....",
+      "....DD......",
+    ],
+    HAGANE: [          // 12x12 → 36x36. 사무라이 로봇 하가네
+      "...DDDDD....",
+      "..DMCCCMD...",
+      "..DMMMMMD...",
+      ".DDMMMMMDD..",
+      "DMMMMMMMMMD.",
+      "DMMMMMMMMMGG",
+      ".DMMMMMMMD..",
+      "..DMMMMMD...",
+      "..DMMMMMD...",
+      "..DM...MD...",
+      "..DM...MD...",
+      ".DD.....DD..",
+    ],
+    SPIRIT: [          // 7x5 → 21x15. 코요리 사역마 (물의 정령)
+      "..DDD..",
+      ".DLLLD.",
+      "DLLLLLD",
+      ".DLLLD.",
+      "..DDD..",
+    ],
+    SPEAR: [           // 7x5 → 21x15. 하가네 사역마 (창)
+      "......G",
+      ".....GG",
+      "DMMMMGG",
+      ".....GG",
+      "......G",
+    ],
   };
 
   // 매 프레임 수백 번 fillRect 하는 대신 오프스크린 캔버스에 한 번만 굽는다.
@@ -176,6 +227,7 @@
     invuln: 0,        // 남은 무적 시간(초)
     charge: 0,        // 누적 차지(초)
     fireCd: 0,        // 다음 발사까지 남은 시간(초)
+    char: 0,          // CHARS 인덱스
   };
 
   const pbullets = [];   // {x, y, w, h, vx, dmg, pierce}
@@ -194,10 +246,11 @@
     boss: null,        // Task 4
     bossTimer: 0,      // Task 4
     cancels: 0,        // Task 1 — 탄 상쇄로 소멸시킨 적탄 수
+    charSel: 0,        // TITLE에서 커서로 고르는 CHARS 인덱스
   };
 
   function resetGame() {
-    game.state = "PLAYING";
+    game.state = "TITLE";
     game.score = 0; game.time = 0; game.waveIdx = 0;
     game.pending.length = 0; game.bombFx = 0; game.scroll = 0;
     game.boss = null; game.bossTimer = 0;
@@ -208,6 +261,12 @@
     player.invuln = 0; player.charge = 0; player.fireCd = 0;
   }
   resetGame();
+
+  // 캐릭터를 고른 뒤 실제 판을 시작한다. resetGame()은 TITLE까지만 되돌린다.
+  function startRun(charIdx) {
+    player.char = charIdx;
+    game.state = "PLAYING";
+  }
 
   // 히트박스 헬퍼. 플레이어는 스프라이트 중앙의 작은 정사각형만 판정한다.
   const playerHit = () => ({
@@ -251,6 +310,12 @@
     e.preventDefault();          // 화살표와 Space는 페이지를 스크롤시킨다
     if (e.repeat) return;
     keys.add(e.code);
+    if (game.state === "TITLE") {
+      if (e.code === "ArrowLeft")  game.charSel = (game.charSel + CHARS.length - 1) % CHARS.length;
+      if (e.code === "ArrowRight") game.charSel = (game.charSel + 1) % CHARS.length;
+      if (e.code === "KeyZ" || e.code === "Space") startRun(game.charSel);
+      return;                       // TITLE에서는 봄/리셋을 받지 않는다
+    }
     if (e.code === "KeyR") resetGame();
     if (e.code === "KeyX") useBomb();
   });
@@ -294,6 +359,61 @@
                         // 매 프레임 다시 때리는 것을 막는다(표적당 1회만 데미지).
     });
   }
+
+  // 코요리: 부적 3방향 확산
+  function fireOfuda() {
+    const n = player.power;
+    const bx = player.x + PW - 4, by = player.y + PH / 2 - BEAD_W / 2;
+    for (let k = -1; k <= 1; k++) {
+      const a = k * OFUDA_SPREAD;
+      for (let i = 0; i < n; i++) {
+        pbullets.push({
+          x: bx, y: by + (i - (n - 1) / 2) * 5,
+          w: BEAD_W, h: BEAD_W,
+          vx: Math.cos(a) * BEAD_SPEED, vy: Math.sin(a) * BEAD_SPEED,
+          dmg: 1, pierce: false, tier: 1,
+        });
+      }
+    }
+  }
+
+  // 코요리 차지: 물의 정령 유도구. 가장 가까운 적을 향해 매 스텝 방향을 튼다.
+  function fireOrb() {
+    pbullets.push({
+      x: player.x + PW, y: player.y + PH / 2 - 6,
+      w: 12, h: 12, vx: ORB_SPEED, vy: 0,
+      dmg: ORB_DMG, pierce: false, tier: 2, homing: true,
+    });
+  }
+
+  // 하가네: 창 1줄, 느리지만 고화력. 파워는 줄 수가 아니라 dmg를 올린다.
+  function fireSpear() {
+    pbullets.push({
+      x: player.x + PW - 4, y: player.y + PH / 2 - 3,
+      w: 14, h: 6, vx: SPEAR_SPEED, vy: 0,
+      dmg: SPEAR_DMG + (player.power - 1), pierce: false, tier: 2,
+    });
+  }
+
+  function fireBigSpear() {
+    pbullets.push({
+      x: player.x + PW, y: player.y + PH / 2 - BIGSPEAR_H / 2,
+      w: BIGSPEAR_W, h: BIGSPEAR_H, vx: PHOENIX_SPEED, vy: 0,
+      dmg: BIGSPEAR_DMG, pierce: true, tier: 3, hit: new Set(),
+    });
+  }
+
+  const CHARS = [
+    { name: "텐가이", spr: "MONK",   familiar: "HAWK",
+      interval: FIRE_INTERVAL,  main: fireBeads,  charge: firePhoenix,
+      blurb: "염주 정면 연사 / 차지: 봉황 관통" },
+    { name: "코요리", spr: "KOYORI", familiar: "SPIRIT",
+      interval: OFUDA_INTERVAL, main: fireOfuda,  charge: fireOrb,
+      blurb: "부적 3방향 확산 / 차지: 유도 정령구" },
+    { name: "하가네", spr: "HAGANE", familiar: "SPEAR",
+      interval: SPEAR_INTERVAL, main: fireSpear,  charge: fireBigSpear,
+      blurb: "창 단발 고화력 / 차지: 대형 관통창" },
+  ];
 
   function useBomb() {
     if (game.state !== "PLAYING" || player.bombs <= 0 || game.bombFx > 0) return;
@@ -530,21 +650,46 @@
     player.x = clamp(player.x + (dx / len) * PLAYER_SPEED * dt, 0, W - PW);
     player.y = clamp(player.y + (dy / len) * PLAYER_SPEED * dt, 0, H - PH);
 
-    // 발사 + 차지. 홀드 중에도 염주는 정상 발사된다 — 홀드하면 발사가
+    // 발사 + 차지. 홀드 중에도 주무장은 정상 발사된다 — 홀드하면 발사가
     // 멈추는 구현은 조작감이 나쁘다.
+    const ch = CHARS[player.char];
     player.fireCd -= dt;
     if (firing()) {
       player.charge = Math.min(player.charge + dt, CHARGE_FULL);
-      if (player.fireCd <= 0) { fireBeads(); player.fireCd = FIRE_INTERVAL; }
+      if (player.fireCd <= 0) { ch.main(); player.fireCd = ch.interval; }
     } else {
-      if (player.charge >= CHARGE_FULL) firePhoenix();
+      if (player.charge >= CHARGE_FULL) ch.charge();
       player.charge = 0;
     }
 
     for (let i = pbullets.length - 1; i >= 0; i--) {
       const b = pbullets[i];
+      if (b.homing) {
+        // 가장 가까운 적(보스 포함)을 향해 방향을 서서히 튼다
+        let tx = b.x + 100, ty = b.y;
+        let best = Infinity;
+        for (const e of enemies) {
+          const dist = Math.hypot(e.x - b.x, e.y - b.y);
+          if (dist < best) { best = dist; tx = e.x + e.w / 2; ty = e.y + e.h / 2; }
+        }
+        if (game.boss) {
+          const bb = bossBox();
+          const dist = Math.hypot(bb.x - b.x, bb.y - b.y);
+          if (dist < best) { tx = bb.x + bb.w / 2; ty = bb.y + bb.h / 2; }
+        }
+        const want = Math.atan2(ty - b.y, tx - b.x);
+        const cur = Math.atan2(b.vy, b.vx);
+        // 각도 차이를 [-PI, PI] 로 정규화해야 목표가 뒤에 있을 때 한 바퀴
+        // 돌아가지 않는다. +3PI 후 모듈러는 음수 나머지를 피하는 관용구다.
+        const diff = ((want - cur + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        const a = cur + clamp(diff, -ORB_TURN * dt, ORB_TURN * dt);
+        const sp = Math.hypot(b.vx, b.vy) || ORB_SPEED;
+        b.vx = Math.cos(a) * sp;
+        b.vy = Math.sin(a) * sp;
+      }
       b.x += b.vx * dt;
-      if (b.x > W) pbullets.splice(i, 1);
+      b.y += (b.vy || 0) * dt;
+      if (b.x > W || b.x + b.w < 0 || b.y > H || b.y + b.h < 0) pbullets.splice(i, 1);
     }
 
     stepWaves(dt);
@@ -596,6 +741,7 @@
 
   // ===== 9. 렌더 =====
   function render() {
+    if (game.state === "TITLE") { drawTitle(); return; }
     ctx.fillStyle = COLOR.sky;
     ctx.fillRect(0, 0, W, H);
     drawParallax();
@@ -742,11 +888,12 @@
   function drawPlayer() {
     // 무적 중에는 점멸시켜 피격을 읽을 수 있게 한다
     if (player.invuln > 0 && Math.floor(player.invuln * 20) % 2 === 0) return;
-    ctx.drawImage(SPR.MONK, Math.round(player.x), Math.round(player.y));
-    // 사역마는 파워업으로 얻는다(원작 규칙). 파워 2 이상에서만 매가 따라온다.
+    const ch = CHARS[player.char];
+    ctx.drawImage(SPR[ch.spr], Math.round(player.x), Math.round(player.y));
+    // 사역마는 파워업으로 얻는다(원작 규칙). 파워 2 이상에서만 사역마가 따라온다.
     if (player.power >= 2) {
       ctx.drawImage(
-        SPR.HAWK,
+        SPR[ch.familiar],
         Math.round(player.x - 22),
         Math.round(player.y + 4 + Math.sin(game.time * 4) * 6)
       );
@@ -769,12 +916,34 @@
     drawText("ARROWS MOVE    Z FIRE (HOLD=CHARGE)    X BOMB    R RESTART", 6, H - 6);
   }
 
-  function drawCentered(s, y, size) {
+  function drawCentered(s, y, size, cx) {
     ctx.font = size + "px monospace";
     ctx.textBaseline = "alphabetic";
     const width = ctx.measureText(s).width;
     ctx.fillStyle = COLOR.hud;
-    ctx.fillText(s, (W - width) / 2, y);
+    ctx.fillText(s, (cx === undefined ? W / 2 : cx) - width / 2, y);
+  }
+
+  function drawTitle() {
+    ctx.fillStyle = COLOR.sky;
+    ctx.fillRect(0, 0, W, H);
+    drawParallax();
+    ctx.fillStyle = COLOR.overlay;
+    ctx.fillRect(0, 0, W, H);
+    drawCentered("짭가이", 70, 28);
+    drawCentered("戦国", 96, 12);
+    for (let i = 0; i < CHARS.length; i++) {
+      const cx = 140 + i * 180;
+      ctx.drawImage(SPR[CHARS[i].spr], cx - PW / 2, 150);
+      if (i === game.charSel) {
+        ctx.strokeStyle = PALETTE.G;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx - PW / 2 - 4.5, 145.5, PW + 9, PH + 9);
+      }
+      drawCentered(CHARS[i].name, 210, 10, cx);
+    }
+    drawCentered(CHARS[game.charSel].blurb, 240, 8);
+    drawCentered("← → SELECT    Z START", 290, 10);
   }
 
   function drawOverlay() {
@@ -830,7 +999,11 @@
     bossTimer: Math.round(game.bossTimer * 10) / 10,
     bombFx: Math.round(game.bombFx * 100) / 100,
     cancels: game.cancels,
+    char: player.char, charSel: game.charSel,
   });
+
+  // 검증 하니스 전용: 캐릭터를 골라 판을 시작한다
+  window.__pick = (i) => { game.charSel = i; startRun(i); };
 
   // 검증 하니스 전용
   window.__tp = (x, y) => { player.x = x; player.y = y; };
@@ -865,6 +1038,10 @@
       scored: game.cancels,
     };
   };
+
+  // 검증 하니스 전용
+  window.__pb = () => pbullets.map((b) => ({ tier: b.tier, dmg: b.dmg, vx: b.vx, vy: b.vy || 0, pierce: !!b.pierce }));
+  window.__clearP = () => { pbullets.length = 0; };
 
   requestAnimationFrame(frame);
 })();
