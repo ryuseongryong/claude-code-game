@@ -193,6 +193,7 @@
     scroll: 0,         // 배경 스크롤 누적(px)
     boss: null,        // Task 4
     bossTimer: 0,      // Task 4
+    cancels: 0,        // Task 1 — 탄 상쇄로 소멸시킨 적탄 수
   };
 
   function resetGame() {
@@ -200,6 +201,7 @@
     game.score = 0; game.time = 0; game.waveIdx = 0;
     game.pending.length = 0; game.bombFx = 0; game.scroll = 0;
     game.boss = null; game.bossTimer = 0;
+    game.cancels = 0;
     pbullets.length = 0; ebullets.length = 0; enemies.length = 0; items.length = 0;
     player.x = 60; player.y = H / 2 - PH / 2;
     player.power = 1; player.lives = LIVES_START; player.bombs = BOMBS_START;
@@ -277,7 +279,7 @@
     for (let i = 0; i < n; i++) {
       pbullets.push({
         x: bx, y: by + (i - (n - 1) / 2) * 9,
-        w: BEAD_W, h: BEAD_W, vx: BEAD_SPEED, dmg: 1, pierce: false,
+        w: BEAD_W, h: BEAD_W, vx: BEAD_SPEED, dmg: 1, pierce: false, tier: 1,
       });
     }
   }
@@ -287,7 +289,7 @@
   function firePhoenix() {
     pbullets.push({
       x: player.x + PW, y: player.y + PH / 2 - PHOENIX_H / 2,
-      w: PHOENIX_W, h: PHOENIX_H, vx: PHOENIX_SPEED, dmg: PHOENIX_DMG, pierce: true,
+      w: PHOENIX_W, h: PHOENIX_H, vx: PHOENIX_SPEED, dmg: PHOENIX_DMG, pierce: true, tier: 3,
       hit: new Set(),  // 관통 탄이 같은 표적을 여러 프레임에 걸쳐 겹쳐 있는 동안
                         // 매 프레임 다시 때리는 것을 막는다(표적당 1회만 데미지).
     });
@@ -347,7 +349,7 @@
     }
   }
 
-  function fireAimed(ex, ey, spread) {
+  function fireAimed(ex, ey, spread, tier) {
     const p = playerHit();
     const base = Math.atan2(p.y + p.h / 2 - ey, p.x + p.w / 2 - ex);
     for (const off of spread) {
@@ -356,6 +358,7 @@
         x: ex, y: ey,
         vx: Math.cos(a) * EB_SPEED,
         vy: Math.sin(a) * EB_SPEED,
+        w: EB_W, h: EB_W, tier: tier === undefined ? 2 : tier,
       });
     }
   }
@@ -489,6 +492,29 @@
     }
   }
 
+  // 탄 단계 상쇄. 최솟값 차감이므로 같은 단계면 둘 다 소멸하고, 다르면 낮은 쪽만
+  // 소멸하면서 높은 쪽의 단계를 깎는다.
+  // 비용은 O(내 탄 x 적 탄). 최악 20x40 = 800회/프레임 = 48k회/초로 JS에서 무시할
+  // 수준이라 공간 분할을 넣지 않는다.
+  function cancelBullets() {
+    for (let i = pbullets.length - 1; i >= 0; i--) {
+      const p = pbullets[i];
+      for (let j = ebullets.length - 1; j >= 0; j--) {
+        const e = ebullets[j];
+        if (!overlaps(p, e)) continue;
+        const m = Math.min(p.tier, e.tier);
+        p.tier -= m;
+        e.tier -= m;
+        if (e.tier <= 0) {
+          ebullets.splice(j, 1);
+          game.score += 10;
+          game.cancels += 1;
+        }
+        if (p.tier <= 0) { pbullets.splice(i, 1); break; }
+      }
+    }
+  }
+
   function step(dt) {
     if (game.state !== "PLAYING") return;
     game.time += dt;
@@ -526,6 +552,7 @@
     stepEbullets(dt);
     stepItems(dt);
     stepBoss(dt);
+    cancelBullets();
     if (game.state !== "PLAYING") return;
 
     // 충돌 판정. 보스도 이 루프에 포함된다 — 히트박스는 전체 박스(72x96).
@@ -579,12 +606,13 @@
 
     // 봉황(pierce)은 일반 염주와 구분된다 — 뒤쪽에 붉은 꼬리를 덧그린다.
     for (const b of pbullets) {
+      const bw = b.pierce ? Math.max(6, Math.round(PHOENIX_W * (b.tier / 3))) : b.w;
       if (b.pierce) {
         ctx.fillStyle = PALETTE.R;
         ctx.fillRect(Math.round(b.x - 8), Math.round(b.y + b.h / 2 - 2), 8, 4);
       }
       ctx.fillStyle = PALETTE.G;
-      ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
+      ctx.fillRect(Math.round(b.x), Math.round(b.y), bw, b.h);
     }
 
     drawEbullets();
@@ -801,6 +829,7 @@
     bossPhase: game.boss ? game.boss.phase : null,
     bossTimer: Math.round(game.bossTimer * 10) / 10,
     bombFx: Math.round(game.bombFx * 100) / 100,
+    cancels: game.cancels,
   });
 
   // 검증 하니스 전용
@@ -822,6 +851,20 @@
   // 평소보다 훨씬 많은 적이 몰리므로, GAMEOVER로 스텝 루프가 멈춰버리기 전에
   // 보스 탄의 컬링을 오래 관찰하려면 라이프를 넉넉히 준다.
   window.__setLives = (n) => { player.lives = n; };
+  // 검증 하니스 전용: 내 탄 1발과 적 탄 1발을 같은 자리에 놓고 한 번 상쇄시킨 뒤
+  // 양쪽의 남은 단계와 생존 여부를 돌려준다. tier 조합을 실제 플레이로 정확히
+  // 만드는 것은 불가능하므로 결정론적 주입이 필요하다.
+  window.__cancelProbe = (pTier, eTier) => {
+    pbullets.length = 0; ebullets.length = 0;
+    pbullets.push({ x: 300, y: 180, w: 4, h: 4, vx: 0, dmg: 1, pierce: false, tier: pTier });
+    ebullets.push({ x: 300, y: 180, w: EB_W, h: EB_W, vx: 0, vy: 0, tier: eTier });
+    cancelBullets();
+    return {
+      pAlive: pbullets.length, pTier: pbullets[0] ? pbullets[0].tier : null,
+      eAlive: ebullets.length, eTier: ebullets[0] ? ebullets[0].tier : null,
+      scored: game.cancels,
+    };
+  };
 
   requestAnimationFrame(frame);
 })();
