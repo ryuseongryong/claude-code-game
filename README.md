@@ -1,14 +1,98 @@
-# Welcome to your CDK TypeScript project
+# 짭가이 — 戦国
 
-This is a blank project for CDK development with TypeScript.
+순수 HTML5 Canvas + vanilla JavaScript **단일 파일** 횡스크롤 슈팅.
+1996년 Psikyo의 아케이드 게임 **텐가이**(戦国ブレード / *Sengoku Blade*)에 대한 오마주입니다.
+이름의 "짭"은 원작의 짝퉁이라는 자기 고백입니다.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+외부 라이브러리·CDN·번들러를 **하나도** 쓰지 않습니다. 게임 전체가
+[`frontend/index.html`](frontend/index.html) 한 파일에 들어 있습니다.
 
-## Useful commands
+## 플레이
 
-* `npm run build`   type-check the project
-* `npm run watch`   watch for changes and type-check
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
+로컬에서:
+
+```bash
+cd frontend && python3 -m http.server 8000
+# http://localhost:8000/index.html
+```
+
+| 키 | 동작 |
+|---|---|
+| `←` `→` `↑` `↓` | 8방향 이동 |
+| `Z` 또는 `Space` | 발사 — **누르고 있으면 차지** |
+| `X` | 봄 (화면의 적 탄을 전부 제거) |
+| `R` | 재시작 |
+
+차지를 꽉 채우고 손을 떼면 사역마 매가 **봉황**이 되어 관통 돌진합니다.
+
+## 원작에서 가져온 것
+
+| 요소 | 원작 |
+|---|---|
+| 장르 | 횡스크롤 슈팅 (전작 『전국 에이스』는 종스크롤이었고 속편에서 전환) |
+| 조작 주체 | **"flying-person shooter"** — 비행기를 조종하지 않고 승병이 맨몸으로 난다 |
+| 세계관 | 전국시대 일본의 환상 버전. 요괴와 **증기 기관 로봇**이 공존 |
+| 차지 | 발사 버튼 홀드로 사역마 공격을 모은다 |
+| 사역마 | 파워업으로 획득·강화. 텐가이는 매, 차지하면 봉황이 되어 돌진 |
+| 주 무장 | 신도 염주 |
+| 봄 | 거대한 한자(卍)가 전방으로 흐른다. 희귀하고 화면 clear 위력이 약하다 |
+| **피격 규칙의 비대칭** | 적 본체 접촉 = 파워 레벨 −1(기절, 죽지 않음) / **적 탄 = 즉사** |
+| 최종보스 | 제한 시간이 있고 초과하면 `CLEAR` 대신 **`BADEND`** |
+
+## 기술적 선택
+
+- **640 × 360 논리 해상도**, 표시 배율은 **정수배만**. 소수 배율은 `image-rendering: pixelated` 하에서도 일부 논리 픽셀을 2px, 일부를 3px로 찍어 스프라이트 두께를 불규칙하게 만듭니다. 단 뷰포트가 640px보다 좁으면 종횡비를 유지한 소수 배율로 폴백합니다 — 살짝 부드러운 화면이라도 전체가 보이는 쪽이 낫습니다.
+- **고정 타임스텝 누산기** (`1/60`초, 프레임당 상한 5스텝). `requestAnimationFrame`의 가변 `dt`를 물리에 직접 쓰면 프레임이 튈 때 거동이 달라지고, 누산 상한이 없으면 탭 복귀 시 수백 스텝을 따라잡으려다 더 느려지는 "죽음의 나선"이 생깁니다.
+- **스프라이트 오프스크린 프리렌더**. 문자 배열을 시작 시 한 번만 캔버스에 구워 이후 `drawImage` 한 번으로 그립니다. 프레임당 수백 번의 `fillRect`가 상수 시간 호출로 줄어듭니다.
+- **플레이어 히트박스는 스프라이트의 1/20** (36×36 스프라이트에 8×8). 슈팅에서는 탄막 사이를 통과하는 것이 게임의 본질이라 히트박스가 작아야 "스칠 듯 피했다"가 성립합니다.
+- **레벨은 데이터**. 웨이브 테이블이 시간순으로 적 편대를 기술합니다.
+- **삼각형은 경로 채우기 대신 1px 바를 쌓아** 그립니다. `beginPath`/`fill`은 안티에일리어싱이 생겨 픽셀아트가 깨집니다.
+
+## 배포
+
+AWS CDK(TypeScript)로 **비공개 S3 버킷 + CloudFront OAC**에 정적 호스팅합니다.
+
+```bash
+npm install
+npx cdk deploy
+```
+
+S3 정적 웹사이트 호스팅 엔드포인트는 HTTP만 지원하고 버킷 공개를 요구하므로 쓰지 않습니다.
+OAC(Origin Access Control)는 CloudFront만 버킷을 읽는 서명된 요청을 사용해
+버킷을 완전 비공개로 유지하면서 HTTPS·HTTP/2·엣지 캐싱을 제공합니다.
+
+> `removalPolicy: DESTROY` + `autoDeleteObjects` 는 실습 편의 설정이며 프로덕션용이 아닙니다.
+> 정리는 `npx cdk destroy`.
+
+## 저장소 구조
+
+```
+frontend/index.html          게임 전체 (HTML + CSS + JS 인라인)
+lib/clawd-jump-stack.ts      S3(비공개) + CloudFront(OAC) + BucketDeployment
+bin/clawd-jump.ts            CDK 엔트리포인트
+docs/superpowers/specs/      설계 문서
+docs/superpowers/plans/      구현 계획
+```
+
+레포와 CDK 스택 이름이 `clawd-jump` 인 것은 이 프로젝트가 **플랫포머로 시작했기 때문**입니다.
+개발 중 장르를 횡스크롤 슈팅으로 교체했고, 인프라 리소스 이름 변경은 스택 교체를
+유발하므로 그대로 두었습니다. `docs/` 에 폐기된 플랫포머 설계와 계획도 보존해
+두었습니다 — 초기 커밋들의 근거 문서입니다.
+
+## 개발 기록
+
+이 저장소는 설계 문서와 구현 계획을 코드와 함께 커밋합니다.
+`docs/superpowers/` 아래에서 각 결정의 근거와, 개발 중 실제로 발견한 결함들을
+볼 수 있습니다. 대표적인 것 몇 가지:
+
+- **타일 범위 계산의 부동소수점 함정** (플랫포머 시절). `floor((v + size - 1) / TILE)` 은 정수 좌표 전용이며, 한 스텝의 침하량 0.36px가 −1px에 먹혀 접지 판정이 영구히 실패합니다. 반열림 구간 `ceil((v + size) / TILE) - 1` 이 옳습니다.
+- **`NaN`은 모든 비교가 false**. 보스 객체에 `h` 속성이 없어 `b.h / 2` 가 `NaN`이 되자, 보스 탄이 명중하지도·렌더되지도·컬링되지도 않았습니다. 45초를 가만히 서 있어도 죽지 않는 보스전이 배포되어 있었습니다.
+- **관통탄은 매 프레임 재타격한다**. `pierce` 탄은 제거되지 않으므로 표적과 겹쳐 있는 동안 계속 판정됩니다. 표적당 1회만 적용하도록 `Set`으로 막아야 합니다.
+- **어떤 상태를 0으로 만드는 동작 직후에 그 상태가 0인지 단정하면 아무것도 검증하지 못한다**. 봄을 쓴 직후 `ebullets === 0` 을 확인하던 검증이 위의 무한 누적 버그를 완전히 가렸습니다.
+- **탄 속도와 난이도는 단조롭지 않다**. 속도를 낮추면 화면 체류 시간이 늘어 동시 탄 밀도가 올라갑니다. 회피 난이도 감소와 밀도 증가 중 무엇이 이기는지는 측정해야 알 수 있었습니다(단일 변수 실험 결과 전자가 이겼습니다).
+
+## 라이선스
+
+원작 텐가이의 저작권은 Psikyo / 현 권리자에게 있습니다.
+이 저장소의 코드는 학습 목적의 재해석이며, 원작의 어떤 애셋도 포함하지 않습니다.
+모든 스프라이트와 그래픽은 문자 배열과 `fillRect` 로 새로 만든 것입니다.
