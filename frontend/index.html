@@ -403,16 +403,21 @@
     });
   }
 
+  // name/blurb는 캔버스에 직접 그려진다 — 방문자 시스템 폰트가 CJK 글리프를
+  // 갖고 있지 않으면 measureText는 0이 아닌 폭을 돌려주면서 글자만 투명하게
+  // 사라지는 침묵 실패가 난다(콘솔 에러도, 레이아웃 붕괴도 없다). 그래서
+  // 캔버스에 그리는 문자열은 ASCII로 고정하고, 텐가이(원작 戦国 오마주)라는
+  // 이름의 한글/한자는 <title> 태그와 drawTitle()의 장식 줄에만 남긴다.
   const CHARS = [
-    { name: "텐가이", spr: "MONK",   familiar: "HAWK",
+    { name: "TENGAI", spr: "MONK",   familiar: "HAWK",
       interval: FIRE_INTERVAL,  main: fireBeads,  charge: firePhoenix,
-      blurb: "염주 정면 연사 / 차지: 봉황 관통" },
-    { name: "코요리", spr: "KOYORI", familiar: "SPIRIT",
+      blurb: "BEADS FRONT / CHARGE: PHOENIX PIERCE" },
+    { name: "KOYORI", spr: "KOYORI", familiar: "SPIRIT",
       interval: OFUDA_INTERVAL, main: fireOfuda,  charge: fireOrb,
-      blurb: "부적 3방향 확산 / 차지: 유도 정령구" },
-    { name: "하가네", spr: "HAGANE", familiar: "SPEAR",
+      blurb: "OFUDA 3-WAY / CHARGE: HOMING ORB" },
+    { name: "HAGANE", spr: "HAGANE", familiar: "SPEAR",
       interval: SPEAR_INTERVAL, main: fireSpear,  charge: fireBigSpear,
-      blurb: "창 단발 고화력 / 차지: 대형 관통창" },
+      blurb: "SPEAR HEAVY / CHARGE: BIG PIERCE" },
   ];
 
   function useBomb() {
@@ -930,8 +935,9 @@
     drawParallax();
     ctx.fillStyle = COLOR.overlay;
     ctx.fillRect(0, 0, W, H);
-    drawCentered("짭가이", 70, 28);
-    drawCentered("戦国", 96, 12);
+    drawCentered("JJAPGAI", 70, 28);
+    // 장식 줄 — CJK 폰트가 없는 환경에서는 이 줄만 빈다(상위집합이라 손실 없음).
+    drawCentered("짭가이 — 戦国", 96, 12);
     for (let i = 0; i < CHARS.length; i++) {
       const cx = 140 + i * 180;
       ctx.drawImage(SPR[CHARS[i].spr], cx - PW / 2, 150);
@@ -943,7 +949,7 @@
       drawCentered(CHARS[i].name, 210, 10, cx);
     }
     drawCentered(CHARS[game.charSel].blurb, 240, 8);
-    drawCentered("← → SELECT    Z START", 290, 10);
+    drawCentered("< > SELECT    Z START", 290, 10);
   }
 
   function drawOverlay() {
