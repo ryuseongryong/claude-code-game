@@ -31,8 +31,21 @@ const { chromium } = resolvePlaywright();
 
 const URL = process.env.CJ_URL || 'http://localhost:8000/index.html';
 
+// CRITICAL 1 수정: 이전에는 러너가 scenario()의 반환값을 전혀 들여다보지 않고
+// console 에러 유무로만 exit 코드를 정했다 — 그래서 시나리오 14개 중 12개는
+// 어떤 결과를 내도 실패할 수 없었다(사람이 JSON을 눈으로 봐야만 알았다). 이제
+// 시나리오는 api.check(label, ok, detail)로 자신이 주장하는 기대값을 직접
+// 단정하고, 러너는 checks 배열을 보고 실패가 있으면 exit 1로 끝낸다.
+const checks = [];
+
 // 시나리오: async (page, api) => 출력할 객체
 const api = {
+  // CRITICAL 1: 시나리오가 자신의 "기대 결과"를 실제로 단정하게 하는 훅.
+  // ok가 falsy면 checks에 실패로 기록되고, 러너가 그것으로 exit 1을 낸다.
+  check: (label, ok, detail) => {
+    checks.push({ label, ok: !!ok, detail: detail === undefined ? null : detail });
+    return !!ok;
+  },
   dbg: (page) => page.evaluate(() => window.__dbg()),
   // 키를 ms 동안 누른 상태로 유지한다. 물리는 실시간으로 흐른다.
   hold: async (page, key, ms) => {
@@ -73,7 +86,14 @@ const scenarios = {
     await api.wait(page, 500);
     const b = await api.dbg(page);
     await api.shot(page, 'loop');
-    return { first: a, after500ms: b, stepsAdvanced: b.steps - a.steps };
+    const stepsAdvanced = b.steps - a.steps;
+    // 60Hz 고정 스텝으로 500ms는 30스텝이어야 한다. 브라우저 스케줄링 지터를
+    // 감안해 28..32로 느슨하게 본다.
+    api.check('loop.stepsAdvanced in 28..32', stepsAdvanced >= 28 && stepsAdvanced <= 32, stepsAdvanced);
+    api.check('loop.scale === 2', b.scale === 2, b.scale);
+    api.check('loop.w === 640', b.w === 640, b.w);
+    api.check('loop.h === 360', b.h === 360, b.h);
+    return { first: a, after500ms: b, stepsAdvanced };
   },
 
   // Task 1 — 탄 단계 상쇄가 tier대로 계산되는지
@@ -85,6 +105,13 @@ const scenarios = {
     const beadVsBead   = await page.evaluate(() => window.__cancelProbe(1, 1));
     const phoenixVs2   = await page.evaluate(() => window.__cancelProbe(3, 2));
     await api.shot(page, 'cancel');
+    // 세 티어 조합의 정확한 결과 — 최솟값 차감 규칙(cancelBullets)이 맞는지.
+    api.check('cancel.beadVsNormal(1,2) pAlive===0', beadVsNormal.pAlive === 0, beadVsNormal);
+    api.check('cancel.beadVsNormal(1,2) eTier===1', beadVsNormal.eTier === 1, beadVsNormal);
+    api.check('cancel.beadVsBead(1,1) pAlive===0', beadVsBead.pAlive === 0, beadVsBead);
+    api.check('cancel.beadVsBead(1,1) eAlive===0', beadVsBead.eAlive === 0, beadVsBead);
+    api.check('cancel.phoenixVs2(3,2) pTier===1', phoenixVs2.pTier === 1, phoenixVs2);
+    api.check('cancel.phoenixVs2(3,2) eAlive===0', phoenixVs2.eAlive === 0, phoenixVs2);
     return { beadVsNormal, beadVsBead, phoenixVs2 };
   },
 
@@ -94,21 +121,41 @@ const scenarios = {
     await api.wait(page, 200);
     const start = await api.dbg(page);
 
-    // 우하단으로 충분히 길게 밀어 클램프 확인
+    // 우하단으로 충분히 길게 밀어 클램프 확인.
+    // 산수 확인(CRITICAL 1 검증 중 발견): PLAYER_SPEED(150)를 대각선
+    // 정규화하면 축당 106.07px/s이고, 2000ms 홀드로는 축당 212px만 간다.
+    // 스폰 지점(x=60)에서 그대로 밀면 x~=272에 그쳐 604(W-PW)에 전혀 못
+    // 미친다 — MINOR 7이 반대쪽(좌상단) 코너에서 잡은 것과 같은 결함이 이
+    // 코너에도 있다("클램프 확인"이라는 이름이지만 실제로는 자유 이동만
+    // 잰다). y는 스폰(162)에서 212px 가면 374로 324를 넘어 우연히 클램프에
+    // 닿지만 x는 아니다. 같은 이유로 여기도 코너 가까이 __tp해 두 축 모두
+    // 진짜로 클램프에 닿게 만든다 — MINOR 7이 좌상단에 적용한 것과 동일한
+    // 처방이다.
+    await page.evaluate(() => window.__tp(554, 274));
     await page.keyboard.down('ArrowRight');
     await page.keyboard.down('ArrowDown');
     await api.wait(page, 2000);
     await page.keyboard.up('ArrowRight');
     await page.keyboard.up('ArrowDown');
     const clamped = await api.dbg(page);
+    api.check('player.clamped px === 604 (W-PW)', clamped.px === 604, clamped.px);
+    api.check('player.clamped py === 324 (H-PH)', clamped.py === 324, clamped.py);
 
-    // 좌상단으로 클램프
+    // 좌상단으로 클램프 (MINOR 7).
+    // PLAYER_SPEED(150)를 대각선 정규화(106.07px/축/s)하면 2000ms 홀드로는
+    // 212px만 간다. 위 우하단 클램프 지점(604,324)에서 그대로 왼쪽위로 밀면
+    // x~=392, y~=112에서 멈춰 두 축 다 0에 못 닿는다(자유 이동을 재는 셈) —
+    // 그래서 코너 가까이 __tp로 옮겨 두고 홀드해야 실제로 클램프(0,0)에
+    // 닿는다. 이 시나리오 안의 다른 __tp 사용(위/아래)과 같은 패턴이다.
+    await page.evaluate(() => window.__tp(50, 50));
     await page.keyboard.down('ArrowLeft');
     await page.keyboard.down('ArrowUp');
     await api.wait(page, 2000);
     await page.keyboard.up('ArrowLeft');
     await page.keyboard.up('ArrowUp');
     const clampedTL = await api.dbg(page);
+    api.check('player.clampedTL px === 0', clampedTL.px === 0, clampedTL.px);
+    api.check('player.clampedTL py === 0', clampedTL.py === 0, clampedTL.py);
 
     // 대각선 정규화: 같은 시간 동안 순수 우향 이동과 대각 우하 이동의
     // x 증가량이 같아야 한다. 정규화가 없으면 대각선이 41% 더 간다.
@@ -127,7 +174,12 @@ const scenarios = {
     await api.hold(page, 'KeyZ', 400);
     const fired = await api.dbg(page);
     await api.shot(page, 'player');
-    return { start, clamped, clampedTL, pureX, diagX, diagRatio: +(diagX / pureX).toFixed(2), fired };
+    const diagRatio = +(diagX / pureX).toFixed(2);
+    // 1/sqrt(2) ~= 0.7071 — 대각선 정규화가 되어 있으면 순수 우향 이동의
+    // 68~73% 만큼만 x가 나가야 한다(정규화가 없으면 1.0 근처가 나온다).
+    api.check('player.diagRatio in 0.68..0.73', diagRatio >= 0.68 && diagRatio <= 0.73, diagRatio);
+    api.check('player.fired.pbullets > 0', fired.pbullets > 0, fired.pbullets);
+    return { start, clamped, clampedTL, pureX, diagX, diagRatio, fired };
   },
 
   // Task 3 — 웨이브 스폰, 적 탄, 접촉=파워다운 / 피탄=사망 비대칭
@@ -142,17 +194,27 @@ const scenarios = {
     await api.wait(page, 2500);
     const wave1 = await api.dbg(page);
     const waveSpawned = wave1.enemies > 0;
+    api.check('combat.waveSpawned (enemies>0)', waveSpawned, wave1.enemies);
 
     // 적 탄이 생성되는지
     await api.wait(page, 2000);
     const shooting = await api.dbg(page);
     await api.shot(page, 'combat');
+    api.check('combat.shooting.ebullets > 0', shooting.ebullets > 0, shooting.ebullets);
 
     // 피탄 사망: 화면 중앙에 방치해 적 탄에 계속 노출시키고 라이프/파워가
     // 움직이는지 본다
     await page.evaluate(() => { window.__tp(320, 160); });
     await api.wait(page, 2500);
     const afterExposure = await api.dbg(page);
+    // 비대칭 규칙의 핵심 절반: 적 탄에 노출되면 라이프가 줄어야 한다(본체
+    // 접촉만으로는 파워만 깎이고 라이프는 불변인 나머지 절반은 bossContact가
+    // 전담해 확인한다).
+    api.check(
+      'combat.afterExposure.lives < t0.lives (적탄 피격으로 라이프 감소)',
+      afterExposure.lives < t0.lives,
+      { before: t0.lives, after: afterExposure.lives }
+    );
 
     return { t0, wave1, waveSpawned, shooting, afterExposure };
   },
@@ -187,11 +249,20 @@ const scenarios = {
       Number.isFinite(b.x) && Number.isFinite(b.y) &&
       Number.isFinite(b.vx) && Number.isFinite(b.vy));
 
-    return {
-      soon: { dbg: soon, ebCount: soonEb.length, allFinite: allFinite(soonEb), sample: soonEb.slice(0, 3) },
-      mid: { dbg: mid, ebCount: midEb.length, allFinite: allFinite(midEb), sample: midEb.slice(0, 3) },
-      late: { dbg: late, ebCount: lateEb.length, allFinite: allFinite(lateEb), sample: lateEb.slice(0, 3) },
-    };
+    const soonR = { dbg: soon, ebCount: soonEb.length, allFinite: allFinite(soonEb), sample: soonEb.slice(0, 3) };
+    const midR  = { dbg: mid,  ebCount: midEb.length,  allFinite: allFinite(midEb),  sample: midEb.slice(0, 3) };
+    const lateR = { dbg: late, ebCount: lateEb.length, allFinite: allFinite(lateEb), sample: lateEb.slice(0, 3) };
+
+    // v1 CRITICAL 회귀(b.h undefined -> NaN 좌표 -> 컬링 불가 -> 무한정 누적)를
+    // 다시 잡는 단정. NaN이면 allFinite가 false가 되고, 컬링이 죽으면 ebCount가
+    // 수천~수만으로 폭주한다(재현: soon 12 -> mid 9000 -> late 24000). 300은
+    // 정상 범위(관찰상 수십 발)보다 훨씬 위이면서 그 폭주는 확실히 잡는 상한이다.
+    for (const [label, r] of [['soon', soonR], ['mid', midR], ['late', lateR]]) {
+      api.check(`bossBulletsFinite.${label}.allFinite`, r.allFinite, r.ebCount);
+      api.check(`bossBulletsFinite.${label}.ebCount bounded (<300)`, r.ebCount < 300, r.ebCount);
+    }
+
+    return { soon: soonR, mid: midR, late: lateR };
   },
 
   // 픽스 검증 4 — 보스 본체 접촉이 파워를 깎고 무적을 세팅하는가 (라이프는
@@ -212,6 +283,10 @@ const scenarios = {
     const samples = [];
     for (let i = 0; i < 10; i++) {
       const placed = await page.evaluate(() => {
+        // 접촉만 순수하게 보려면 보스 자신의 탄(텐마의 조준탄/나선탄)이 우연히
+        // 명중해 라이프를 깎는 오염을 막아야 한다 — bossHudZOrder가 같은 이유로
+        // 매 샘플 __clearEB()를 쓰는 것과 동일한 패턴이다.
+        window.__clearEB();
         const box = window.__bossBox();
         if (!box) return null;
         window.__tp(box.x + box.w / 2 - 18, box.y + box.h / 2 - 18);
@@ -223,7 +298,22 @@ const scenarios = {
     }
     await api.shot(page, 'boss-contact');
 
-    return { before, samples, after: samples[samples.length - 1].snap };
+    // CRITICAL 2 수정: 이전엔 __bossBox()가 null이면(보스가 안 뜬 경우) 조용히
+    // __tp를 건너뛰고 그냥 통과했다 — bossHudZOrder:267과 같은 "대상 부재인데
+    // 통과" 결함. 여기도 같은 가드를 건다.
+    if (samples.some((s) => s.snap.bossName === null)) {
+      throw new Error(`boss never spawned (bossName null) — samples: ${JSON.stringify(samples)}`);
+    }
+
+    const after = samples[samples.length - 1].snap;
+    // 그리고 이 시나리오가 실제로 주장하는 것: 본체 접촉은 파워를 깎고
+    // 라이프는 건드리지 않는다(비대칭 피격 규칙의 나머지 절반).
+    api.check('bossContact.after.power < before.power', after.power < before.power,
+      { before: before.power, after: after.power });
+    api.check('bossContact.after.lives === before.lives', after.lives === before.lives,
+      { before: before.lives, after: after.lives });
+
+    return { before, samples, after };
   },
 
   // 픽스 검증 5 — 보스 HP 바가 플레이어 스프라이트 위에 그려지는가(z-순서).
@@ -267,11 +357,15 @@ const scenarios = {
       throw new Error(`boss never spawned (bossName null) — samples: ${JSON.stringify(samples)}`);
     }
 
-    return {
-      samples,
-      barPixelAlwaysHud: samples.every((s) => s.barPixel === '#6fa88a' || s.barPixel === '#3a3631'),
-      bodyPixelEverShowsPlayer: samples.some((s) => s.bodyPixel === '#d97757'),
-    };
+    const barPixelAlwaysHud = samples.every((s) => s.barPixel === '#6fa88a' || s.barPixel === '#3a3631');
+    const bodyPixelEverShowsPlayer = samples.some((s) => s.bodyPixel === '#d97757');
+    // 두 불리언이 z-순서 주장을 함께 뒷받침해야 한다: 바 칸은 항상 HUD 색이고
+    // (바가 위에 그려짐), 같은 칸이 바 바깥(row5)에서는 실제로 로브색을 보여야
+    // (그 칸이 원래부터 비어있던 자리가 아니라는 대조군) 한다.
+    api.check('bossHudZOrder.barPixelAlwaysHud', barPixelAlwaysHud, samples.map((s) => s.barPixel));
+    api.check('bossHudZOrder.bodyPixelEverShowsPlayer', bodyPixelEverShowsPlayer, samples.map((s) => s.bodyPixel));
+
+    return { samples, barPixelAlwaysHud, bodyPixelEverShowsPlayer };
   },
 
   // Task 2 — 캐릭터 3명이 각각 다른 탄을 내는지
@@ -302,6 +396,27 @@ const scenarios = {
         };
       });
     }
+    // CJK 침묵 실패 회귀 방지: 잉크가 실제로 찍혔는지(글자가 그려졌는지).
+    api.check('chars.ink.title > 0', ink.title > 0, ink.title);
+    api.check('chars.ink.names > 0', ink.names > 0, ink.names);
+    api.check('chars.ink.control > 0', ink.control > 0, ink.control);
+
+    // 캐릭터별 무장 특성 — tier/dmg/anyVy는 각 캐릭터의 무장 구현(440-505행)이
+    // 실제로 다른지를 증명한다.
+    api.check('chars[0](TENGAI).count > 0', out[0].count > 0, out[0].count);
+    api.check('chars[0](TENGAI).tiers === [1]', JSON.stringify(out[0].tiers) === '[1]', out[0].tiers);
+    api.check('chars[0](TENGAI).dmgs === [1]', JSON.stringify(out[0].dmgs) === '[1]', out[0].dmgs);
+    api.check('chars[0](TENGAI).anyVy === false (직선 염주)', out[0].anyVy === false, out[0].anyVy);
+
+    api.check('chars[1](KOYORI).count > 0', out[1].count > 0, out[1].count);
+    api.check('chars[1](KOYORI).tiers === [1]', JSON.stringify(out[1].tiers) === '[1]', out[1].tiers);
+    api.check('chars[1](KOYORI).anyVy === true (3방향 확산)', out[1].anyVy === true, out[1].anyVy);
+
+    api.check('chars[2](HAGANE).count > 0', out[2].count > 0, out[2].count);
+    api.check('chars[2](HAGANE).tiers === [2]', JSON.stringify(out[2].tiers) === '[2]', out[2].tiers);
+    api.check('chars[2](HAGANE).dmgs === [2] (SPEAR_DMG+power-1)', JSON.stringify(out[2].dmgs) === '[2]', out[2].dmgs);
+    api.check('chars[2](HAGANE).anyVy === false (직선 창)', out[2].anyVy === false, out[2].anyVy);
+
     return { title, ink, out };
   },
 
@@ -323,6 +438,20 @@ const scenarios = {
     await api.wait(page, 100);
     const act3 = await api.dbg(page);
     await api.shot(page, 'stage-act3');
+
+    api.check('stages.shuffleCheck.differs === true', shuffleCheck.differs === true, shuffleCheck);
+    const scAt = (s) => scaling.find((x) => x.s === s);
+    const sc1 = scAt(1), sc29 = scAt(29);
+    // hpMul(s)=1+(s-1)*.08, fireMul(s)=1/(1+(s-1)*.03), spdMul(s)=1+(s-1)*.02.
+    // s=1에서는 전부 배율 1(스케일링 없음). s=29: hp=1+28*.08=3.24,
+    // fire=1/1.84=0.54, spd=1+28*.02=1.56.
+    api.check('stages.scaling s=1 (no scaling)', sc1.hp === 1 && sc1.fire === 1 && sc1.spd === 1, sc1);
+    api.check('stages.scaling s=29 hp===3.24', sc29.hp === 3.24, sc29.hp);
+    api.check('stages.scaling s=29 fire===0.54', sc29.fire === 0.54, sc29.fire);
+    api.check('stages.scaling s=29 spd===1.56', sc29.spd === 1.56, sc29.spd);
+    api.check('stages.act2.act === 2 (stage 11)', act2.act === 2, act2.act);
+    api.check('stages.act3.act === 3 (stage 21)', act3.act === 3, act3.act);
+
     return { s1, shuffleCheck, scaling, act2, act3 };
   },
 
@@ -344,6 +473,15 @@ const scenarios = {
       };
       await api.shot(page, `boss-${s}`);
     }
+    for (const s of [10, 20, 30]) {
+      api.check(`bosses3[${s}].name !== null (스폰됨)`, out[s].name !== null, out[s].name);
+      api.check(`bosses3[${s}].allFinite (탄 좌표 유한)`, out[s].allFinite, out[s]);
+    }
+    // timeLimit: 10/20은 0(제한 없음), 30(텐마)만 45초 — spawnBoss가
+    // game.bossTimer = def.timeLimit로 세팅하고 stepBoss가 매 프레임 깎는다.
+    api.check('bosses3[10].timer === 0', out[10].timer === 0, out[10].timer);
+    api.check('bosses3[20].timer === 0', out[20].timer === 0, out[20].timer);
+    api.check('bosses3[30].timer in 40..45 (45초 제한, 2.5s 경과)', out[30].timer > 40 && out[30].timer <= 45, out[30].timer);
     return out;
   },
 
@@ -367,6 +505,10 @@ const scenarios = {
         if (d.lives < 3 || d.state !== "PLAYING") { out[s] = d; break; }
       }
       if (!out[s]) out[s] = await api.dbg(page);
+    }
+    for (const s of [10, 20, 30]) {
+      api.check(`bosses3Lethal[${s}] lives<3 or state!==PLAYING (가만히 있으면 죽는다)`,
+        out[s].lives < 3 || out[s].state !== 'PLAYING', out[s]);
     }
     return out;
   },
@@ -402,11 +544,20 @@ const scenarios = {
     }
     const warn = samples.filter((x) => x.phase === "warn");
     const fire = samples.filter((x) => x.phase === "fire");
+    const warnDamaged = warn.filter((x) => x.livesAfter < 3).length;
+    const fireDamaged = fire.filter((x) => x.livesAfter < 3).length;
+    // 표본이 0개면 warnDamaged===0 같은 단정이 공허하게 통과한다 — 그 자체가
+    // 이 웨이브가 잡으려는 vacuous-assertion 패턴이므로 표본 수부터 단정한다.
+    api.check('laser.warnSamples > 0', warn.length > 0, warn.length);
+    api.check('laser.fireSamples > 0', fire.length > 0, fire.length);
+    // 공정성의 핵심: 예고 구간에서는 절대 안 맞고, 빔 구간에서는 반드시 맞는다.
+    api.check('laser.warnDamaged === 0 (예고 구간 무판정)', warnDamaged === 0, warnDamaged);
+    api.check('laser.fireDamaged > 0 (빔 구간 판정 있음)', fireDamaged > 0, fireDamaged);
     return {
       warnSamples: warn.length,
-      warnDamaged: warn.filter((x) => x.livesAfter < 3).length,
+      warnDamaged,
       fireSamples: fire.length,
-      fireDamaged: fire.filter((x) => x.livesAfter < 3).length,
+      fireDamaged,
     };
   },
 
@@ -429,6 +580,11 @@ const scenarios = {
     const titleDbg = await api.dbg(page);
     await api.shot(page, 'title-unlocked');
 
+    api.check('checkpoint.fresh.unlocked === 1 (초기 상태)', fresh.unlocked === 1, fresh.unlocked);
+    api.check('checkpoint.afterAct1.unlocked === 2 (10 격파로 2막 해금)', afterAct1.unlocked === 2, afterAct1.unlocked);
+    api.check('checkpoint.afterReload.unlocked === 2 (새로고침에도 유지)', afterReload.unlocked === 2, afterReload.unlocked);
+    api.check('checkpoint.titleDbg.state === TITLE', titleDbg.state === 'TITLE', titleDbg.state);
+
     return { fresh, afterAct1, afterReload, titleDbg };
   },
 
@@ -446,6 +602,11 @@ const scenarios = {
     await page.evaluate(() => window.__pick(0));
     await api.wait(page, 500);
     const playing = await api.dbg(page);
+    // localStorage가 getter에서 던지는 상황에서도 게임이 정상 부팅되고
+    // (resetGame -> TITLE) 정상 진행되어야(__pick 이후 PLAYING) 한다 —
+    // 저장 실패가 플레이를 막으면 안 된다는 게 이 시나리오의 존재 이유다.
+    api.check('noStorage.dbg.state === TITLE (차단돼도 부팅)', dbg.state === 'TITLE', dbg.state);
+    api.check('noStorage.playing.state === PLAYING (차단돼도 진행)', playing.state === 'PLAYING', playing.state);
     return { dbg, playing };
   },
 
@@ -505,6 +666,13 @@ const scenarios = {
       );
     }
 
+    api.check('checkpointMonotonic.afterAct1.unlocked === 2', afterAct1.unlocked === 2, afterAct1.unlocked);
+    api.check('checkpointMonotonic.afterAct2.unlocked === 3 (저장 실패에도 세션 내 해금)', afterAct2.unlocked === 3, afterAct2.unlocked);
+    // 디스크 쓰기가 실제로 막혔다는 증거: setItem이 던지게 만든 뒤이므로
+    // 디스크 원본은 2막 저장 시점(act:2) 그대로 멈춰 있어야 한다.
+    api.check('checkpointMonotonic.diskAfterAct2 === diskAfterAct1 (쓰기 실패로 디스크 정지)',
+      diskAfterAct2 === diskAfterAct1, { diskAfterAct1, diskAfterAct2 });
+
     return { afterAct1, diskAfterAct1, afterAct2, diskAfterAct2, afterReset };
   },
 };
@@ -539,6 +707,13 @@ const scenarios = {
   await page.goto(URL, { waitUntil: 'load' });
   const result = await scenario(page, api);
   await browser.close();
-  console.log(JSON.stringify({ scenario: name, consoleErrors: errors, result }, null, 2));
-  if (errors.length) process.exit(1);
+  const failed = checks.filter((c) => !c.ok);
+  console.log(JSON.stringify({ scenario: name, consoleErrors: errors, checks, result }, null, 2));
+  // CRITICAL 1 수정: 이전엔 errors.length만 봤다 — 시나리오가 무엇을 반환하든
+  // (모든 값이 실패를 의미해도) exit 0이었다. 이제 checks에 기록된 단정 중
+  // 하나라도 실패하면 exit 1이고, 어떤 라벨이 실패했는지 이름으로 찍는다.
+  if (failed.length) {
+    console.error(`FAILED CHECKS (${failed.length}/${checks.length}): ${failed.map((c) => c.label).join(', ')}`);
+  }
+  if (errors.length || failed.length) process.exit(1);
 })().catch((e) => { console.error('HARNESS FAIL:', e.message); process.exit(1); });

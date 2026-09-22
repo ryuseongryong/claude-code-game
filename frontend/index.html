@@ -703,7 +703,11 @@
         return;
       }
     }
-    if (game.boss && overlaps(hb, bossBox())) {
+    // MINOR 6 수정: stepBoss는 hp<=0인 보스를 "다음" 프레임에야 game.boss=null로
+    // 지운다(668-681). 그래서 이 프레임의 플레이어 탄 충돌 루프가 hp를 0 이하로
+    // 만든 바로 그 프레임에는 시체 상태의 보스가 여전히 여기 걸린다 — 위 enemies
+    // 루프가 e.hp<=0인 시체를 건너뛰는 것과 같은 이유로 보스도 걸러야 한다.
+    if (game.boss && game.boss.hp > 0 && overlaps(hb, bossBox())) {
       player.power = Math.max(1, player.power - 1);
       player.invuln = INVULN_CONTACT;
     }
@@ -909,12 +913,17 @@
       b.fireCd = b.phase === 1 ? 1.6 : 1.2;
     }
 
-    // 돌진: 4초 주기로 x=200까지 0.8초에 이동 후 복귀
+    // 돌진: 4초 주기로 x=200까지 0.8초에 이동 후 복귀.
+    // IMPORTANT 4 수정: 220px/s * 0.8s = 176px뿐이라 xHome(530)에서 클램프
+    // (200)까지 330px을 못 가고 354에서 멈췄다(화면 횡단 실패). 스펙의 "0.8초"는
+    // 그대로 두고 속도를 거기서 역산한다: (xHome - 200) / 0.8 = 330 / 0.8 =
+    // 412.5 px/s. 이러면 0.8초가 끝나는 순간 정확히 x=200에 도달한다.
+    const ONI_DASH_SPEED = (b.def.xHome - 200) / 0.8;
     b.extra.dashCd = (b.extra.dashCd || 4) - dt;
     if (b.extra.dashCd <= 0) { b.dash = 0.8; b.extra.dashCd = 4; }
     if (b.dash > 0) {
       b.dash -= dt;
-      b.x = Math.max(200, b.x - 220 * dt);
+      b.x = Math.max(200, b.x - ONI_DASH_SPEED * dt);
     } else if (b.x < b.def.xHome) {
       b.x = Math.min(b.def.xHome, b.x + 120 * dt);
     }
@@ -934,11 +943,18 @@
     if (b.extra.laserT >= LASER_CYCLE) {
       b.extra.laserT = 0;
       b.extra.laserY = player.y + PH / 2;            // 예고 시점의 플레이어 y로 고정
+      // IMPORTANT 5 수정: ys를 매 프레임 "현재" b.phase로 다시 계산하면, hp가
+      // 이 사이클이 진행되는 도중(경고~빔 0.75초 사이)에 70을 넘나들어 phase가
+      // 바뀔 때 거울 라인이 예고 없이 즉시 나타나 즉사시킨다. 이 사이클이 쓸
+      // 판정 세트는 예고가 시작되는 지금(사이클 리셋 시점)의 phase로 한 번만
+      // 정하고 사이클이 끝날 때까지 얼린다 — phase 변화는 다음 사이클부터만
+      // 반영된다.
+      b.extra.laserYs = b.phase === 1
+        ? [b.extra.laserY]
+        : [b.extra.laserY, H - b.extra.laserY];
     }
     const lt = b.extra.laserT;
-    const ys = b.extra.laserY === undefined ? [] : (b.phase === 1
-      ? [b.extra.laserY]
-      : [b.extra.laserY, H - b.extra.laserY]);
+    const ys = b.extra.laserYs || [];
     if (lt < LASER_TELEGRAPH) {
       game.beam = { ys, phase: "warn" };
     } else if (lt < LASER_TELEGRAPH + LASER_BEAM) {
@@ -1295,7 +1311,11 @@
   }
 
   function drawOverlay() {
-    if (game.state === "PLAYING") return;
+    // IMPORTANT 3 수정: 이전엔 "PLAYING이 아니면 전부"(부정 목록)여서 v1엔 없던
+    // STAGEBANNER까지 여기 걸려 배너와 HUD가 이중으로 어두워졌다. 전체화면
+    // 딤은 실제로 그것을 의도한 세 상태에만 긍정 목록으로 건다 — 나중에 상태가
+    // 추가돼도 이 목록에 넣지 않는 한 안전하게 기본 미적용이 된다.
+    if (game.state !== "CLEAR" && game.state !== "BADEND" && game.state !== "GAMEOVER") return;
     ctx.fillStyle = COLOR.overlay;
     ctx.fillRect(0, 0, W, H);
 
